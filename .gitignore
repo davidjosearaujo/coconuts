@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tool output
+dumped_cocos_assets/
+*.apk
+*.jsc
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

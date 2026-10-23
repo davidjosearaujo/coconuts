@@ -1,0 +1,4 @@
+frida-tools==14.11.0
+r2pipe==2.0.0
+xxtea==6.2.0
+pycryptodome==3.23.0
