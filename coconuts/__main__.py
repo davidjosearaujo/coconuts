@@ -1,31 +1,7 @@
-#!/usr/bin/env python3
+"""CLI entry point (`coconuts` / `python -m coconuts`): argument parsing and the static-vs-Frida race.
 
-# Usage:
-#   coconuts <libcocos.so> <package> [output_dir] [options]
-#   (or, from a checkout: python3 -m coconuts <libcocos.so> <package> [output_dir] [options])
-#
-# Examples:
-#   # Parallel static + Frida key capture & dump, then offline decryption of APK assets
-#   coconuts ./libcocos.so com.example.game ./out
-#
-#   # Keep collecting live (incl. hot-updated) scripts for 60s after the key is found
-#   coconuts ./libcocos.so com.example.game ./out --live-seconds 60
-#
-#   # No Frida: try key candidates from the lib's strings against a local APK or raw_jsc folder
-#   coconuts ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
-#
-#   # x-studio / EncryptManager AES-CBC assets with a known key+iv (e.g. from a Frida capture)
-#   coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
-#       --aes-key e7895ce80904fced... --aes-iv 9f9da80fee3290bf...
-#
-# Requirements:
-#   - pip install r2pipe frida-tools xxtea pycryptodome
-#     (`xxtea`, not `xxtea-py`: both install a module named xxtea, but only `xxtea` has the API used
-#      here; without it a ~150x slower pure-Python XXTEA is used.
-#      pycryptodome is only needed for EncryptManager AES-CBC assets.)
-#   - radare2 installed
-#   - adb (unless --apk is used): from PATH, $ANDROID_HOME / $ANDROID_SDK_ROOT, or the default
-#     Android Studio SDK location (~/Library/Android/sdk on macOS)
+Usage, examples and requirements are in `coconuts --help` and the README.
+"""
 
 from __future__ import annotations
 
