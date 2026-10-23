@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "coconuts"
+version = "0.1.0"
+description = "Dump and decrypt Cocos2d-x / Cocos Creator scripts and assets from an Android app."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "David Araujo", email = "coconuts@davidjosearaujo.dev" }]
+keywords = ["cocos2d-x", "cocos-creator", "xxtea", "frida", "android", "reverse-engineering"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: POSIX",
+    "Topic :: Security",
+    "Topic :: Software Development :: Disassemblers",
+    "Environment :: Console",
+]
+dependencies = [
+    "frida-tools>=14.11.0",
+    "r2pipe>=2.0.0",
+    "xxtea>=6.2.0",
+    "pycryptodome>=3.23.0",
+]
+
+[project.scripts]
+coconuts = "coconuts.__main__:main"
+
+[tool.setuptools]
+packages = ["coconuts"]
+
+[tool.setuptools.package-data]
+coconuts = ["frida_hook.js"]

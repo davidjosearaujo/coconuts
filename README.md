@@ -1,8 +1,12 @@
-# coconuts
+<p align="center">
+  <img src="assets/coconut-crack.svg" alt="coconuts logo: a coconut cracked open with water splashing out" width="112">
+</p>
 
-Dump and decrypt Cocos2d-x / Cocos Creator scripts and assets from an Android app.
+<h1 align="center">coconuts</h1>
 
-`cocos-dumper.py` runs two tracks in parallel and uses whichever wins:
+<p align="center">Dump and decrypt Cocos2d-x / Cocos Creator scripts and assets from an Android app.</p>
+
+`coconuts` runs two tracks in parallel and uses whichever wins:
 
 - **Static** — recovers the XXTEA key from strings in `libcocos.so` / `libcocos2djs.so` (radare2).
 - **Dynamic** — spawns the app under Frida, hooks the engine to capture the key (and AES key/IV)
@@ -14,10 +18,13 @@ x-studio **EncryptManager AES-256-CBC**.
 ## Install
 
 ```sh
-pipx install git+https://github.com/<you>/coconuts        # or: pipx install .
-# or, for development:
-python3 -m venv .venv && . .venv/bin/activate && pip install -r requirements.txt
+pipx install git+https://codeberg.org/davidjosearaujo/coconuts        # or: pipx install .
+# or, for development (editable install):
+python3 -m venv .venv && . .venv/bin/activate && pip install -e .
 ```
+
+This installs a `coconuts` command. From a checkout you can also run it as
+`python3 -m coconuts`.
 
 `pipx` handles the Python dependencies. Three things it can't install, because they aren't Python
 packages:
@@ -33,20 +40,20 @@ Requires Python 3.9+ and an **arm64** target library.
 
 ```sh
 # Parallel static + Frida capture, then offline decryption of the APK assets
-python3 cocos-dumper.py ./libcocos.so com.example.game ./out
+coconuts ./libcocos.so com.example.game ./out
 
 # Keep collecting live (incl. hot-updated) scripts for 60s after the key is found
-python3 cocos-dumper.py ./libcocos.so com.example.game ./out --live-seconds 60
+coconuts ./libcocos.so com.example.game ./out --live-seconds 60
 
 # No Frida: recover the key from the lib's strings against a local APK or raw .jsc folder
-python3 cocos-dumper.py ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
+coconuts ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
 
 # EncryptManager AES-CBC assets with a known key+iv
-python3 cocos-dumper.py ./libcocos.so com.example.game ./out --apk ./base.apk \
+coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
     --aes-key <hex> --aes-iv <hex>
 ```
 
-Run `python3 cocos-dumper.py --help` for all options.
+Run `coconuts --help` for all options.
 
 ## Status
 
