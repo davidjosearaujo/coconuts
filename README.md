@@ -30,6 +30,7 @@ AES-protected builds it decrypts every asset, not just the scripts.
 - [Requirements](#requirements)
 - [Install](#install)
 - [Preparing the library and the device](#preparing-the-library-and-the-device)
+- [Linux and x86 PCs](#linux-and-x86-pcs)
 - [Usage](#usage)
 - [Output](#output)
 - [Troubleshooting](#troubleshooting)
@@ -177,10 +178,10 @@ from the captured flags when Frida catches the key.
 | Requirement | Needed for | Notes |
 |---|---|---|
 | Python ≥ 3.9 | everything | The Python dependencies (`frida-tools`, `r2pipe`, `xxtea`, `pycryptodome`) are installed for you. |
-| [radare2](https://github.com/radareorg/radare2) on `PATH` | Frida hook resolution; static tier 0 | Without it the dynamic track can't run, but static tiers 1–3 still work. `brew install radare2`, your distro's package, or radare2's `sys/install.sh`. |
+| [radare2](https://github.com/radareorg/radare2) on `PATH` | Frida hook resolution; static tier 0 | Without it the dynamic track can't run, but static tiers 1–3 still work. `brew install radare2` on macOS; on Linux see [Installing on Debian](#installing-on-debian). |
 | adb (Android platform-tools) | Pulling APKs and picking the device | Found on `PATH`, `$ANDROID_HOME`, `$ANDROID_SDK_ROOT`, `~/Library/Android/sdk` or `~/Android/Sdk`. Not needed with `--apk --static-only`. |
 | frida-server, running as root on the device | Dynamic track | Must match the `frida` version coconuts installed. See [below](#running-frida-server). |
-| An **arm64** device or emulator with the game installed | Dynamic track and pulling APKs | Hook offsets come from the arm64 library, so the game must run its arm64 build. Apple-silicon emulators and real phones work. |
+| An **arm64** device or emulator with the game installed | Dynamic track | Hook offsets come from the arm64 library, so the game must run its arm64 build. Apple-silicon emulators and real phones work. Any device or emulator will do for just pulling APKs. On an x86 PC, see [Linux and x86 PCs](#linux-and-x86-pcs). |
 
 ## Install
 
@@ -245,6 +246,99 @@ adb shell '/data/local/tmp/frida-server >/dev/null 2>&1 &'
 ```
 
 The game must be installed, but you don't need to start it. coconuts spawns it itself.
+
+## Linux and x86 PCs
+
+coconuts runs on an x86_64 PC just as it does on a Mac. Nothing it runs  is ARM-specific.
+
+What changes is **which Android device you can use**. The Frida track needs the game to run its arm64 native code, and the Android Emulator on an x86 PC can't provide that (see [why](#why-x86_64-emulators-cant-be-hooked)).
+
+### Choosing a setup
+
+| Setup | Static track | Frida track |
+|---|---|---|
+| 1. A rooted arm64 phone over USB | ✓ | ✓ |
+| 2. No device, with an APK you already have | ✓ | — |
+| 3. An x86_64 emulator | ✓ (as the APK source) | — |
+
+Without the Frida track you lose three things:
+- **Keys that aren't stored as plain strings** in the library, for example obfuscated or computed ones.
+- **Live dumps**, and with them any hot-updated scripts.
+- **`EncryptManager` AES key capture.** AES-protected games then need a key and IV you already know
+  (`--aes-key`, `--aes-iv`).
+
+**1. A rooted arm64 phone over USB (recommended).** Everything works. Your PC only drives the phone, so
+coconuts takes the same arm64 path that's been tested on arm64 emulators.
+- frida-server needs root, for example through Magisk. Start it with the `su -c` line in
+  [Running frida-server](#running-frida-server).
+- Wireless debugging (`adb connect`) should also work, since Frida finds Android devices through
+  adb, but it hasn't been tested. Pass the `ip:port` serial with `--device`.
+
+**2. No device: static only.** This works on any PC:
+
+```sh
+coconuts ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
+```
+
+You need the APK and the engine library from inside it, for example from your own build or pulled
+from a device earlier.
+
+**3. An x86_64 emulator, as an APK source.** Install the game in an x86_64 emulator (a "Google Play"
+system image lets you install it from the Play Store) and let coconuts pull the APKs:
+
+```sh
+coconuts ./libcocos.so com.example.game ./out --static-only
+```
+
+Always pass `--static-only` here. Without it, the Frida track spawns the game and waits the full
+`--timeout` for a key that never comes.
+
+To get the library from the emulator, follow [Getting the engine library](#getting-the-engine-library).
+The emulator may have installed `lib/x86_64/` (in `split_config.x86_64.apk`) instead of
+`lib/arm64-v8a/`. That's usually fine for the static search: the key is a build setting, compiled
+into every ABI's library, and the search mostly reads strings. It has only been tested with arm64
+libraries, though.
+
+### Installing on Debian
+
+```sh
+sudo apt install pipx adb android-sdk-platform-tools-common
+pipx ensurepath                 # then open a new terminal
+pipx install git+https://codeberg.org/davidjosearaujo/coconuts
+```
+
+- **radare2.** Install a current release rather than Debian's package, which tends to lag far behind.
+  Either download `radare2_<version>_amd64.deb` from the
+  [releases page](https://github.com/radareorg/radare2/releases) and run
+  `sudo apt install ./radare2_*_amd64.deb`, or build it with
+  `git clone https://github.com/radareorg/radare2 && radare2/sys/install.sh`.
+- **pipx, not pip.** Debian blocks system-wide `pip install`, so use pipx as above, or a virtualenv.
+- **`adb devices` shows the phone as `no permissions`.** That's USB access.
+  `android-sdk-platform-tools-common` installs the udev rules, so replug the phone. If it persists,
+  run `sudo usermod -aG plugdev $USER` and log in again.
+- **Debian's adb is too old for your phone**, for example it has no `adb pair` for wireless debugging.
+  Use Google's [platform-tools](https://developer.android.com/tools/releases/platform-tools) instead.
+  coconuts finds adb on `PATH` and in `~/Android/Sdk`, where Android Studio installs it on Linux.
+- **coconuts warns `Fast XXTEA unavailable`.** If `xxtea` had to be built from source and the build
+  failed, install `build-essential python3-dev` and run `pipx reinstall coconuts`.
+
+### Why x86_64 emulators can't be hooked
+
+- **The emulator can't run arm64 Android.** On an x86 PC the Android Emulator runs x86_64 system
+  images. arm64 images either aren't offered for x86 hosts or run far too slowly to use.
+- **ARM-only games run through translation.** Many Cocos games ship only ARM native libraries. In an
+  x86_64 image, Android runs those through an ARM translation layer, and Frida can't hook code running
+  inside it.
+- **x86_64 game builds aren't supported yet.** Even games that do ship x86_64 libraries can't be hooked
+  yet, because coconuts' hook resolution only handles arm64 libraries.
+
+To see which build a game is running:
+
+```sh
+adb shell dumpsys package com.example.game | grep -i cpuabi
+#   primaryCpuAbi=arm64-v8a   ← on an x86_64 emulator: the ARM build, running under translation
+#   primaryCpuAbi=x86_64      ← an x86_64 build, which the Frida track doesn't support yet
+```
 
 ## Usage
 
@@ -385,11 +479,12 @@ The dynamic track couldn't start. Common causes:
 Run with `-v` for the full error. The static track carries on regardless.
 
 **`App exited or crashed before the key was captured.`**
-Often the game detected root or Frida, or it's running a non-arm64 build (x86 emulators). Rely on
-`--static-only`, or try another device.
+Often the game detected root or Frida. Rely on `--static-only`, or try another device.
 
 **`No key captured within 10s.`**
-Some games only load their scripts after a splash or login screen. Raise `--timeout`.
+Some games only load their scripts after a splash or login screen. Raise `--timeout`. On an x86_64
+emulator this is expected, because the Frida track can't hook games there. Use `--static-only`
+instead (see [Linux and x86 PCs](#linux-and-x86-pcs)).
 
 **`Captured key … doesn't decrypt the APK's .jsc files; ignoring it.`**
 The hook caught some other XXTEA call. coconuts re-runs the full static search automatically.
@@ -410,7 +505,9 @@ downloads them.
 
 ## Limitations
 
-- **arm64 only.** Both the library analysis and the hook offsets assume the arm64-v8a build.
+- **arm64 Android targets only, for the Frida track.** The library analysis and the hook offsets assume
+  the arm64-v8a build. Your computer can be any OS or CPU, but on an x86 PC the Frida track needs a
+  real arm64 phone. See [Linux and x86 PCs](#linux-and-x86-pcs).
 - **Heuristics.** The string tiers and the rule for finding the XXTEA call inside the
   "Can't decrypt code" function are empirical, tuned on the builds coconuts was developed against.
   Unusual or heavily obfuscated builds may need the Frida track or `--key`.
@@ -452,7 +549,9 @@ Two conventions to keep when contributing:
 - `frida`, `r2pipe` and `Crypto` are imported lazily, so unrelated paths work without them.
 - Problems surface as one-line errors, never as tracebacks.
 
-Developed and tested against arm64 targets on Apple-silicon Macs with arm64 emulators.
+Developed and tested against arm64 targets on Apple-silicon Macs with arm64 emulators. Linux x86_64
+hosts should work with the setups in [Linux and x86 PCs](#linux-and-x86-pcs), but haven't been tested
+yet.
 
 ## Responsible use
 
