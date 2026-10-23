@@ -1,6 +1,6 @@
 """
-Static XXTEA/XOR key recovery from the library's strings (ranked Tier 0 -> Tier 3) and from the
-.data.rel.ro vtable pointer, plus the known-plaintext XOR attack and the key-verification helpers.
+Static XXTEA/XOR key recovery from the library's strings (ranked Tier 0 -> Tier 3), plus the
+known-plaintext XOR attack and the key-verification helpers.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from .ciphers import (
     xor_decrypt,
 )
 from .log import SUCCESS, slog
-from .r2 import _r2_abort_guard, _resolve_relro_set_xxtea_key
+from .r2 import _r2_abort_guard
 
 # Known plaintexts from 'Framework: Cocos2d-js' for instant (<1ms) XOR key recovery
 KNOWN_PLAINTEXT_HEADERS = [
@@ -234,40 +234,8 @@ def recover_key_static(
     t0 = time.monotonic()
     samples = _key_samples(entries)
 
-    # Universal Optimization (Tier 0b - static .data.rel.ro vtable resolution)
-    vtable_key = None
-    try:
-        import r2pipe
-        r2 = r2pipe.open(os.path.abspath(lib_path), flags=["-2"])
-        try:
-            with _r2_abort_guard(r2, abort_event):
-                relro_off = _resolve_relro_set_xxtea_key(r2)
-                if relro_off and not (abort_event and abort_event.is_set()):
-                    raw_bytes = r2.cmd(f"psz @ {relro_off:#x}").strip().encode("latin-1", errors="ignore")
-                    if 3 <= len(raw_bytes) <= 32:
-                        vtable_key = normalize_key(raw_bytes)
-                        slog.info("Candidate key from the .data.rel.ro vtable pointer: %r", vtable_key)
-        finally:
-            with contextlib.suppress(Exception):
-                r2.quit()
-    except Exception as e:
-        slog.debug("Static vtable check skipped: %s", e)
-
-    if abort_event and abort_event.is_set():
-        slog.info("Frida captured the key first; stopping the static search.")
-        if high_prob_done is not None:
-            high_prob_done.set()
-        return None
-
-    if vtable_key and all(_key_decrypts(s, vtable_key, sign=sign) for s in samples):
-        elapsed_ms = (time.monotonic() - t0) * 1000
-        slog.log(SUCCESS, "Key found via the .data.rel.ro vtable pointer (%.1f ms): %s", elapsed_ms,
-                 describe_key(vtable_key))
-        if high_prob_done is not None:
-            high_prob_done.set()
-        return vtable_key
-
-    # Standard tiered scan fallback
+    # No static .data.rel.ro probe here: that slot points at setXXTeaKey's code, and the key is only
+    # its argument. The Frida track hooks that function to read the argument at runtime instead.
     tier_stats: dict[str, int] = {}
     candidates = find_possible_keys(lib_path, sig_prefix=sign, abort_event=abort_event, tier_stats=tier_stats)
     if not candidates or (abort_event and abort_event.is_set()):

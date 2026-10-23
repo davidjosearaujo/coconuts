@@ -76,6 +76,8 @@ def _resolve_relro_set_xxtea_key(r2) -> int | None:
     """
     Fast path from 'Framework: Cocos2d-js' (.data.rel.ro section):
     On stripped arm64 libcocos.so, .data.rel.ro + 0xa0 holds cc::CocosApplication::setXXTeaKey.
+    Returns the function's *code* address (a Frida hook target), never the key: the key is the
+    function's std::string argument and only exists at runtime.
     """
     sections = r2.cmdj("iSj") or []
     relro = next((s for s in sections if s.get("name") == ".data.rel.ro"), None)

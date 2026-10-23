@@ -129,7 +129,7 @@ def resolve_frida_targets(
         return cocos_symbol, dump_off, key_off, key_is_std_string
 
     # Only run heavy `aap; aaef` if key_off was not found via symbol table or .data.rel.ro.
-    # Wait for high-probability static tiers (vtable + Tier0..Tier2) first; if Tier 3 continues,
+    # Wait for high-probability static tiers (Tier0..Tier2) first; if Tier 3 continues,
     # race heavy r2 analysis in parallel and kill r2 immediately if abort_event fires.
     if key_off is None:
         if high_prob_done is not None and not (abort_event and abort_event.is_set()):
