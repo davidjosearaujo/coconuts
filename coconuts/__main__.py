@@ -9,11 +9,13 @@ import argparse
 import contextlib
 import logging
 import os
+import re
 import sys
 import tempfile
 import threading
 
 from .adb import DeviceError, adb_resolve_device, pull_apks
+from .manifest import extract_engine_lib, read_apk_metadata
 from .aes import aes_roll_from_flags
 from .ciphers import (
     _xxtea_c,
@@ -29,13 +31,53 @@ from .statickeys import _key_decrypts, _key_samples, recover_key_static, recover
 
 DEFAULT_OUTPUT_DIR = "dumped_cocos_assets"
 
+# A dotted identifier with no path separators, e.g. com.example.game — used to tell a package name
+# apart from a library path or an output dir among the optional positional arguments.
+_PACKAGE_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+\Z")
+
+
+def _looks_like_package(value: str) -> bool:
+    return "/" not in value and os.sep not in value and bool(_PACKAGE_RE.match(value))
+
+
+def classify_positionals(values: list[str]) -> tuple[str | None, str | None, str | None, list[str]]:
+    """Sort the free positionals into (lib, package, output), returning any leftovers.
+
+    Both LIB and PACKAGE are optional now, so a lone positional is ambiguous; we disambiguate by
+    shape: a ``.so``/existing file is the library, a dotted identifier is the package, and whatever
+    is left is the output dir. This keeps the historical ``LIB PACKAGE [OUTPUT]`` order working.
+    """
+    remaining = list(values)
+    lib = package = output = None
+    for v in list(remaining):
+        if v.endswith(".so") or os.path.isfile(v):
+            lib = v
+            remaining.remove(v)
+            break
+    for v in list(remaining):
+        if _looks_like_package(v):
+            package = v
+            remaining.remove(v)
+            break
+    if remaining:
+        output = remaining.pop(0)
+    return lib, package, output, remaining
+
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="coconuts",
                                 description="Dump/decrypt Cocos2d-JS / Cocos Creator scripts from an Android app.")
-    p.add_argument("lib", help="path to libcocos.so / libcocos2djs.so (arm64)")
-    p.add_argument("package", help="target package name, e.g. com.example.game")
-    p.add_argument("output", nargs="?", default=DEFAULT_OUTPUT_DIR, help=f"output dir (default: {DEFAULT_OUTPUT_DIR})")
+    p.add_argument("positional", nargs="*", metavar="LIB PACKAGE OUTPUT",
+                   help="engine library (libcocos.so / libcocos2djs.so, arm64), package name "
+                        "(e.g. com.example.game) and output dir, in that order. With --apk, LIB and "
+                        "PACKAGE may be omitted: the library is taken from the APK and the package "
+                        "from its manifest. OUTPUT defaults to " + DEFAULT_OUTPUT_DIR + ".")
+    p.add_argument("--lib", dest="lib_opt", metavar="PATH",
+                   help="engine library path (same as the LIB positional; overrides it)")
+    p.add_argument("--package", dest="package_opt", metavar="NAME",
+                   help="package name (same as the PACKAGE positional; overrides it)")
+    p.add_argument("-o", "--output", dest="output_opt", metavar="DIR",
+                   help="output dir (same as the OUTPUT positional; overrides it)")
     p.add_argument("--device", help="adb serial / Frida device id (default: first USB device)")
     p.add_argument("--timeout", type=float, default=10.0, help="seconds to wait for the key (default: 10)")
     p.add_argument("--live-seconds", type=float, default=5.0,
@@ -55,7 +97,15 @@ def parse_args(argv=None):
                    help="pull all split_config.*.apk files instead of only base/feature APKs")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     p.add_argument("--no-color", action="store_true", help="disable coloured output (also honours $NO_COLOR)")
-    return p.parse_args(argv)
+    args = p.parse_args(argv)
+
+    pos_lib, pos_package, pos_output, leftover = classify_positionals(args.positional)
+    if leftover:
+        p.error("unrecognised positional argument(s): " + " ".join(leftover))
+    args.lib = args.lib_opt or pos_lib
+    args.package = args.package_opt or pos_package
+    args.output = args.output_opt or pos_output or DEFAULT_OUTPUT_DIR
+    return args
 
 
 def main(argv=None) -> int:
@@ -68,7 +118,7 @@ def main(argv=None) -> int:
                     "To fix: pip uninstall xxtea-py; pip install xxtea")
         log.debug("xxtea import error: %s", _xxtea_import_error)
 
-    if not os.path.isfile(args.lib):
+    if args.lib is not None and not os.path.isfile(args.lib):
         log.error("%s doesn't exist", args.lib)
         return 1
 
@@ -84,8 +134,13 @@ def main(argv=None) -> int:
             log.error("--aes-key / --aes-iv must be hex strings")
             return 1
 
-    # APKs come from the device unless --apk is given: fail fast if adb can't reach it
+    # APKs come from the device unless --apk is given: fail fast if adb can't reach it. Pulling needs
+    # the package name (there's no manifest to read it from until something is pulled), so require it.
     if not args.apk:
+        if not args.package:
+            log.error("PACKAGE is required when pulling from the device; pass it, or use --apk to "
+                      "read a local APK (the package is then taken from its manifest).")
+            return 1
         try:
             serial = adb_resolve_device(serial)
         except DeviceError as e:
@@ -96,13 +151,49 @@ def main(argv=None) -> int:
     try:
         # Keep TemporaryDirectory in main()'s outer scope so pulled APKs are NEVER deleted early
         with tempfile.TemporaryDirectory() as tmp:
+            # With a local APK we can fill in whatever the user left off the command line: the package
+            # from the manifest, and the engine library's base name (android.app.lib_name) for when
+            # it isn't the usual libcocos.so / libcocos2djs.so.
+            manifest_lib_name = None
+            if args.apk:
+                man_package, manifest_lib_name = read_apk_metadata(args.apk)
+                if not args.package and man_package:
+                    args.package = man_package
+                    log.info("Package name from the APK manifest: %s", man_package)
+
             # Case 1: Static-only mode, a known XXTEA key, or an explicit AES key — go offline directly
             if args.static_only or aes is not None or (key is not None and args.apk):
                 apk_paths = args.apk or pull_apks(args.package, serial, tmp, all_splits=args.all_splits)
-                extract_offline(apk_paths, key, args.lib, args.output, forced_sign=forced_sign, aes=aes)
+                lib_path = args.lib
+                # The XXTEA static search is the only thing that needs the library; a known key, an
+                # AES key, or XOR-via-known-plaintext don't. So derive it only when it could be used,
+                # and fail soft (XOR can still win) if the APK doesn't carry it.
+                if lib_path is None and key is None and aes is None:
+                    lib_name = manifest_lib_name if args.apk else read_apk_metadata(apk_paths)[1]
+                    lib_path = extract_engine_lib(apk_paths, lib_name, tmp)
+                    if lib_path is None:
+                        log.warning("No engine library found in the APK(s); the XXTEA key search "
+                                    "needs one. Falling back to XOR / known-plaintext only.")
+                extract_offline(apk_paths, key, lib_path, args.output, forced_sign=forced_sign, aes=aes)
                 return 0
 
             # Case 2: Dual-Track Race (Static background pull+solve vs. Dynamic Frida hook)
+            # Spawning the game needs the package, and Frida needs the library up front to resolve its
+            # hook offsets. Derive the library from --apk when LIB was omitted; without --apk there are
+            # no local files yet, so LIB must be given (or use --static-only).
+            if not args.package:
+                log.error("PACKAGE is required to spawn the game under Frida; pass it, or use "
+                          "--static-only with --apk.")
+                return 1
+            lib_path = args.lib
+            if lib_path is None:
+                if args.apk:
+                    lib_path = extract_engine_lib(args.apk, manifest_lib_name, tmp)
+                if lib_path is None:
+                    log.error("LIB is required for the static+Frida race; pass it, add --apk so the "
+                              "engine library can be read from the APK, or use --static-only.")
+                    return 1
+
             log.info("Racing the static key search against Frida...")
             static_won = threading.Event()
             dynamic_won = threading.Event()
@@ -143,7 +234,7 @@ def main(argv=None) -> int:
                         return
 
                     cand_key = recover_key_static(
-                        args.lib, entries, sign=sign, abort_event=dynamic_won, high_prob_done=high_prob_done
+                        lib_path, entries, sign=sign, abort_event=dynamic_won, high_prob_done=high_prob_done
                     )
                     shared_state["static_searched"] = cand_key is not None or not dynamic_won.is_set()
                     if cand_key:
@@ -168,7 +259,7 @@ def main(argv=None) -> int:
                     try:
                         import frida
                         cocos_symbol, dump_off, key_off, key_is_std_string = resolve_frida_targets(
-                            args.lib, abort_event=static_won, high_prob_done=high_prob_done
+                            lib_path, abort_event=static_won, high_prob_done=high_prob_done
                         )
                         if not static_won.is_set():
                             device = frida.get_device(serial, timeout=5) if serial else frida.get_usb_device(timeout=5)
@@ -234,7 +325,7 @@ def main(argv=None) -> int:
             extract_offline(
                 apks,
                 final_key,
-                None if shared_state["static_searched"] else args.lib,
+                None if shared_state["static_searched"] else lib_path,
                 args.output,
                 forced_sign=forced_sign,
                 preloaded_entries=entries,

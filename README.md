@@ -44,8 +44,8 @@ AES-protected builds it decrypts every asset, not just the scripts.
 coconuts gets you from "a Cocos game installed on a phone" to "readable JavaScript" with one command,
 without knowing in advance how that particular build protects its scripts.
 
-- **One command, no prior knowledge.** You give it the engine library and the package name. It works
-  out the scheme, the key and any signature prefix.
+- **One command, no prior knowledge.** You give it the engine library and the package name (or just
+  an APK, which it reads both from). It works out the scheme, the key and any signature prefix.
 - **Use every source of truth available.** A key stored in the binary is found in milliseconds. Frida
   covers keys that are obfuscated, computed at runtime or otherwise not sitting in the strings.
   Running both at once means you wait for whichever is faster, not for both.
@@ -343,13 +343,21 @@ adb shell dumpsys package com.example.game | grep -i cpuabi
 ## Usage
 
 ```
-coconuts [options] LIB PACKAGE [OUTPUT]
+coconuts [options] [LIB] [PACKAGE] [OUTPUT]
 ```
 
-- `LIB` is the arm64 engine library. It's always required, even when you pass a key.
-- `PACKAGE` is the app's package name. It's used to pull the APKs and to spawn the game. It's still
-  required, but unused, when nothing touches the device.
+- `LIB` is the arm64 engine library. With `--apk` you can leave it off: coconuts reads the library's
+  name from the APK manifest (`android.app.lib_name`, so it also handles builds where it isn't
+  `libcocos.so` / `libcocos2djs.so`) and pulls the matching `lib/arm64-v8a/*.so` out of the APK.
+  Otherwise it's required.
+- `PACKAGE` is the app's package name. It's used to pull the APKs and to spawn the game. With `--apk`
+  it's read from the manifest, so you can leave it off; it's still required when coconuts pulls from
+  the device (there's no manifest to read yet) or spawns the game under Frida.
 - `OUTPUT` is the output folder. The default is `dumped_cocos_assets`.
+
+The three are positional in the order above, and a lone positional is sorted by shape (a `.so` path
+is `LIB`, a dotted name is `PACKAGE`, anything else is `OUTPUT`). If that guess is ever wrong, name
+them explicitly with `--lib`, `--package` and `-o/--output`.
 
 ### Common recipes
 
@@ -366,6 +374,9 @@ coconuts ./libcocos.so com.example.game ./out --timeout 60 --live-seconds 60
 # No device at all: static search against a local APK, or a folder of .jsc files
 coconuts ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
 coconuts ./libcocos.so com.example.game ./out --static-only --apk ./unzipped_apk/
+
+# Same, but let the APK supply the library and the package name (LIB and PACKAGE omitted)
+coconuts --static-only --apk ./base.apk ./out
 
 # Base APK plus a feature split that also carries scripts
 coconuts ./libcocos.so com.example.game ./out --static-only --apk base.apk --apk split_game.apk
@@ -392,6 +403,9 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 
 | Option | Default | Description |
 |---|---|---|
+| `--lib PATH` | the `LIB` positional, else from `--apk` | Engine library path. Overrides the positional; with `--apk` it's optional (read from the APK). |
+| `--package NAME` | the `PACKAGE` positional, else from `--apk` | Package name. Overrides the positional; with `--apk` it's optional (read from the manifest). |
+| `-o`, `--output DIR` | the `OUTPUT` positional, else `dumped_cocos_assets` | Output folder. Overrides the positional. |
 | `--device SERIAL` | the only connected device | adb serial, also used as the Frida device id. Fails if several devices are connected and none is chosen. With `--apk` and no `--device`, Frida uses the first USB device. |
 | `--timeout SEC` | `10` | How long Frida waits for a key after spawning the game. |
 | `--live-seconds SEC` | `5` | How long to keep the Frida session open after the key, collecting scripts as the game evaluates them. Ctrl-C ends it early and moves on to decryption. |
