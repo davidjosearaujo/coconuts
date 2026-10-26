@@ -251,7 +251,7 @@ The game must be installed, but you don't need to start it. coconuts spawns it i
 
 coconuts runs on an x86_64 PC just as it does on a Mac. Nothing it runs  is ARM-specific.
 
-What changes is **which Android device you can use**. The Frida track needs the game to run its arm64 native code, and the Android Emulator on an x86 PC can't provide that (see [why](#why-x86_64-emulators-cant-be-hooked)).
+What changes is **which Android device you can use**. The Frida track needs the game to run its arm64 native code, and the Android Emulator on an x86 PC can't provide that (see [why](#why-x86_64-emulators-can-t-be-hooked)).
 
 ### Choosing a setup
 
