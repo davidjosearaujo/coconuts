@@ -27,6 +27,7 @@ from .ciphers import (
 from .extract import collect_jsc_entries, extract_offline
 from .frida_dump import FileWriter, build_frida_script, resolve_frida_targets, run_frida_race
 from .log import SUCCESS, ConsoleFormatter, flog, log, slog, use_color
+from .pretty import prettify_dir
 from .statickeys import _key_decrypts, _key_samples, recover_key_static, recover_xor_key_kp
 
 DEFAULT_OUTPUT_DIR = "dumped_cocos_assets"
@@ -95,6 +96,8 @@ def parse_args(argv=None):
                    help="local APK or directory of .jsc files to decrypt instead of pulling from device (repeatable)")
     p.add_argument("--all-splits", action="store_true",
                    help="pull all split_config.*.apk files instead of only base/feature APKs")
+    p.add_argument("--pretty", action="store_true",
+                   help="reformat the dumped .js files in place with jsbeautifier (minified one-liners become readable)")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     p.add_argument("--no-color", action="store_true", help="disable coloured output (also honours $NO_COLOR)")
     args = p.parse_args(argv)
@@ -106,6 +109,13 @@ def parse_args(argv=None):
     args.package = args.package_opt or pos_package
     args.output = args.output_opt or pos_output or DEFAULT_OUTPUT_DIR
     return args
+
+
+def _finish(args) -> int:
+    """Runs the post-dump steps once the output folder is complete."""
+    if args.pretty:
+        prettify_dir(args.output)
+    return 0
 
 
 def main(argv=None) -> int:
@@ -175,7 +185,7 @@ def main(argv=None) -> int:
                         log.warning("No engine library found in the APK(s); the XXTEA key search "
                                     "needs one. Falling back to XOR / known-plaintext only.")
                 extract_offline(apk_paths, key, lib_path, args.output, forced_sign=forced_sign, aes=aes)
-                return 0
+                return _finish(args)
 
             # Case 2: Dual-Track Race (Static background pull+solve vs. Dynamic Frida hook)
             # Spawning the game needs the package, and Frida needs the library up front to resolve its
@@ -301,7 +311,7 @@ def main(argv=None) -> int:
                     return 1
                 extract_offline(apks, None, None, args.output,
                                 preloaded_entries=entries, aes=aes)
-                return 0
+                return _finish(args)
 
             # A key from Frida stops the static search, so make sure it actually decrypts the assets
             if dyn_key and not static_key and entries:
@@ -330,7 +340,7 @@ def main(argv=None) -> int:
                 forced_sign=forced_sign,
                 preloaded_entries=entries,
             )
-            return 0
+            return _finish(args)
 
     except DeviceError as e:
         log.error("%s", e)

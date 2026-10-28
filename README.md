@@ -381,6 +381,9 @@ coconuts --static-only --apk ./base.apk ./out
 # Base APK plus a feature split that also carries scripts
 coconuts ./libcocos.so com.example.game ./out --static-only --apk base.apk --apk split_game.apk
 
+# Reformat the dumped scripts so minified one-liners are readable
+coconuts --static-only --apk ./base.apk ./out --pretty
+
 # You already know the key (and, optionally, the signature prefix)
 coconuts ./libcocos.so com.example.game ./out --apk ./base.apk --key 1a2b3c4d-5e6f-7a --sign kkk
 
@@ -417,6 +420,7 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--aes-roll N` | `5` | The signature roll count. Read from the captured flags automatically when Frida catches the key. |
 | `--apk PATH` | — | A local APK/zip or a directory to read assets from, instead of pulling from the device. Repeatable. Zip files are read from their `assets/` folder. For directories, a leading `assets/` is stripped from paths. |
 | `--all-splits` | off | Also pull `split_config.*.apk`. Language, density and ABI splits are skipped by default because they never contain scripts. |
+| `--pretty` | off | After the dump, reformat every `.js` file in the output folder in place with [jsbeautifier](https://github.com/beautifier/js-beautify), so minified one-line bundles become readable. Prints one progress line per file. Large bundles are slow (a 4 MB one-liner takes about half a minute). |
 | `-v`, `--verbose` | off | Debug output: per-file decryption failures, radare2 and Frida details, tracebacks. |
 | `--no-color` | off | Disable ANSI colours. You can also set `NO_COLOR` or `TERM=dumb`. Colours are off automatically when stderr isn't a terminal. |
 
@@ -529,6 +533,8 @@ downloads them.
   exit before the key is captured.
 - **XXTEA and XOR modes only process `.jsc` files.** Other assets are only handled in AES mode.
 - **SpiderMonkey bytecode isn't decompiled.**
+- **With `--pretty`, every `.js` file is reformatted in place**, live dumps included. The minified
+  originals aren't kept.
 
 ## Project layout and development
 
@@ -543,6 +549,7 @@ coconuts/
 ├── frida_dump.py   # Frida target resolution, the race, the live-dump writer
 ├── frida_hook.js   # the Frida agent injected into the game
 ├── adb.py          # device selection and APK pulling
+├── pretty.py       # --pretty: jsbeautifier pass over the dumped .js files
 └── extract.py      # asset collection and offline decryption
 ```
 

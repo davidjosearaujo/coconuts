@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- `--pretty`: after the dump, reformat every `.js` file in the output folder
+  in place with jsbeautifier, with a progress line per file. jsbeautifier is
+  now a dependency.
+
 ## [1.0.0] - 2026-10-23
 
 Initial release, a tool that recovers the script encryption key of Cocos2d-x /
