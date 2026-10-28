@@ -176,15 +176,23 @@ def main(argv=None) -> int:
                 apk_paths = args.apk or pull_apks(args.package, serial, tmp, all_splits=args.all_splits)
                 lib_path = args.lib
                 # The XXTEA static search is the only thing that needs the library; a known key, an
-                # AES key, or XOR-via-known-plaintext don't. So derive it only when it could be used,
-                # and fail soft (XOR can still win) if the APK doesn't carry it.
+                # AES key, or XOR-via-known-plaintext don't, and neither do scripts shipped
+                # unencrypted. So derive it only when it could be used, and fail soft (XOR can still
+                # win) if the APK doesn't carry it.
+                entries = None
                 if lib_path is None and key is None and aes is None:
-                    lib_name = manifest_lib_name if args.apk else read_apk_metadata(apk_paths)[1]
-                    lib_path = extract_engine_lib(apk_paths, lib_name, tmp)
-                    if lib_path is None:
-                        log.warning("No engine library found in the APK(s); the XXTEA key search "
-                                    "needs one. Falling back to XOR / known-plaintext only.")
-                extract_offline(apk_paths, key, lib_path, args.output, forced_sign=forced_sign, aes=aes)
+                    with contextlib.ExitStack() as stack:
+                        entries = collect_script_entries(stack, apk_paths)
+                    if entries:
+                        log.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
+                    if split_plain_scripts(entries)[0]:
+                        lib_name = manifest_lib_name if args.apk else read_apk_metadata(apk_paths)[1]
+                        lib_path = extract_engine_lib(apk_paths, lib_name, tmp)
+                        if lib_path is None:
+                            log.warning("No engine library found in the APK(s); the XXTEA key search "
+                                        "needs one. Falling back to XOR / known-plaintext only.")
+                extract_offline(apk_paths, key, lib_path, args.output, forced_sign=forced_sign,
+                                preloaded_entries=entries, aes=aes)
                 return _finish(args)
 
             # Case 2: Dual-Track Race (Static background pull+solve vs. Dynamic Frida hook)

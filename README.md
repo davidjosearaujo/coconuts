@@ -182,7 +182,8 @@ differences:
 
 Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
 hooks in particular are untested. Script bundles shipped as one encrypted zip (loaded with
-`loadChunksFromZIP`, often `game.zip` / `src.zip`) aren't collected yet.
+`loadChunksFromZIP`, often `game.zip` / `src.zip`) aren't collected yet. Open items are tracked in
+[TODO.md](TODO.md).
 
 ## Supported encryption schemes
 
