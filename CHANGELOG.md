@@ -7,10 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-10-28
+
 ### Added
 - `--pretty`: after the dump, reformat every `.js` file in the output folder
   in place with jsbeautifier, with a progress line per file. jsbeautifier is
   now a dependency.
+- With `--apk`, `LIB` and `PACKAGE` are optional: the package name is read
+  from the APK's binary `AndroidManifest.xml`, and the engine library
+  (`lib/arm64-v8a/lib<name>.so`, named by `android.app.lib_name` when it isn't
+  `libcocos.so` / `libcocos2djs.so`) is extracted from the APK.
+- `--lib`, `--package` and `-o/--output` name the positionals explicitly; a
+  lone positional is sorted by shape (`.so` path, dotted name, or output dir).
+
+### Changed
+- The engine library is streamed out of the APK instead of being read into
+  memory whole.
+
+### Fixed
+- A broken link in the README.
 
 ## [1.0.0] - 2026-10-23
 
@@ -46,5 +61,6 @@ Cocos Creator Android games and dumps their decrypted JavaScript.
   PCs, usage, output, troubleshooting and limitations; the MIT license and the
   coconut logo.
 
-[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.0.0...HEAD
+[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.1.0...HEAD
+[1.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.0.0...v1.1.0
 [1.0.0]: https://codeberg.org/davidjosearaujo/coconuts/releases/tag/v1.0.0
