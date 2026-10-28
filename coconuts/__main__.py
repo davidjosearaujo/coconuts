@@ -24,7 +24,7 @@ from .ciphers import (
     detect_signature_prefix,
     normalize_key,
 )
-from .extract import collect_jsc_entries, extract_offline
+from .extract import collect_script_entries, extract_offline, split_plain_scripts
 from .frida_dump import FileWriter, build_frida_script, resolve_frida_targets, run_frida_race
 from .log import SUCCESS, ConsoleFormatter, flog, log, slog, use_color
 from .pretty import prettify_dir
@@ -67,9 +67,9 @@ def classify_positionals(values: list[str]) -> tuple[str | None, str | None, str
 
 def parse_args(argv=None):
     p = argparse.ArgumentParser(prog="coconuts",
-                                description="Dump/decrypt Cocos2d-JS / Cocos Creator scripts from an Android app.")
+                                description="Dump/decrypt Cocos2d-JS / Cocos Creator / Cocos2d-x Lua scripts from an Android app.")
     p.add_argument("positional", nargs="*", metavar="LIB PACKAGE OUTPUT",
-                   help="engine library (libcocos.so / libcocos2djs.so, arm64), package name "
+                   help="engine library (libcocos.so / libcocos2djs.so / libcocos2dlua.so, arm64), package name "
                         "(e.g. com.example.game) and output dir, in that order. With --apk, LIB and "
                         "PACKAGE may be omitted: the library is taken from the APK and the package "
                         "from its manifest. OUTPUT defaults to " + DEFAULT_OUTPUT_DIR + ".")
@@ -85,7 +85,7 @@ def parse_args(argv=None):
                    help="keep the session open this long after the key to collect live dumps (default: 5)")
     p.add_argument("--static-only", action="store_true", help="skip Frida; recover the key from the lib's strings")
     p.add_argument("--key", help="known key (ASCII); skips key discovery")
-    p.add_argument("--sign", help="explicit .jsc header signature to strip (default: auto-detect)")
+    p.add_argument("--sign", help="explicit script header signature to strip (default: auto-detect)")
     p.add_argument("--aes-key", metavar="HEX",
                    help="EncryptManager AES key (hex); decrypt x-studio AES-CBC assets instead of XXTEA/XOR")
     p.add_argument("--aes-iv", metavar="HEX", default="",
@@ -93,7 +93,7 @@ def parse_args(argv=None):
     p.add_argument("--aes-roll", type=int, default=5,
                    help="EncryptManager signature roll count (default: 5; auto-detected when captured via Frida)")
     p.add_argument("--apk", action="append",
-                   help="local APK or directory of .jsc files to decrypt instead of pulling from device (repeatable)")
+                   help="local APK or directory of .jsc / .luac files to decrypt instead of pulling from device (repeatable)")
     p.add_argument("--all-splits", action="store_true",
                    help="pull all split_config.*.apk files instead of only base/feature APKs")
     p.add_argument("--pretty", action="store_true",
@@ -220,12 +220,19 @@ def main(argv=None) -> int:
                     apks = args.apk or pull_apks(args.package, serial, tmp, all_splits=args.all_splits)
                     shared_state["apks"] = apks
                     with contextlib.ExitStack() as stack:
-                        entries = collect_jsc_entries(stack, apks)
+                        entries = collect_script_entries(stack, apks)
                     shared_state["entries"] = entries
                     if not entries:
-                        slog.warning("No .jsc files found in the APK(s).")
+                        slog.warning("No .jsc / .luac / .lua files found in the APK(s).")
                         return
-                    slog.info("Found %d .jsc asset(s) across %d input path(s).", len(entries), len(apks))
+                    slog.info("Found %d script(s) across %d input path(s).", len(entries), len(apks))
+                    # Unencrypted Lua scripts are copied as-is later; only the rest need (and can test) a key
+                    entries, _plain = split_plain_scripts(entries)
+                    if not entries:
+                        slog.info("None of the scripts are encrypted; no key needed.")
+                        shared_state["static_searched"] = True
+                        static_won.set()
+                        return
 
                     if key is not None:
                         shared_state["static_key"] = key
@@ -314,13 +321,14 @@ def main(argv=None) -> int:
                 return _finish(args)
 
             # A key from Frida stops the static search, so make sure it actually decrypts the assets
-            if dyn_key and not static_key and entries:
-                sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(entries.values()))
-                samples = _key_samples(entries)
+            encrypted = split_plain_scripts(entries)[0] if entries else {}
+            if dyn_key and not static_key and encrypted:
+                sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(encrypted.values()))
+                samples = _key_samples(encrypted)
                 if all(_key_decrypts(s, dyn_key, sign=sign) for s in samples):
-                    flog.log(SUCCESS, "Key verified against %d .jsc file(s).", len(samples))
+                    flog.log(SUCCESS, "Key verified against %d script(s).", len(samples))
                 else:
-                    flog.warning("Captured key %s doesn't decrypt the APK's .jsc files; ignoring it.",
+                    flog.warning("Captured key %s doesn't decrypt the APK's scripts; ignoring it.",
                                 describe_key(dyn_key))
                     dyn_key = None
                     if not shared_state["static_searched"]:

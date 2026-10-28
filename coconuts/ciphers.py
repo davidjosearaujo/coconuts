@@ -14,6 +14,7 @@ from .log import log
 
 ZIP_MAGIC = b"PK\x03\x04"
 SPIDERMONKEY_MAGICS = (b"\x2c\xc0\x73\xb9", b"\x1c\xc0\x73\xb9", b"\x2b\xc0\x73\xb9")
+LUA_MAGICS = (b"\x1bLua", b"\x1bLJ")  # compiled chunks: PUC Lua (luac) and LuaJIT
 
 _DELTA = 0x9E3779B9
 _MASK = 0xFFFFFFFF
@@ -90,7 +91,7 @@ def detect_signature_prefix(samples: list[bytes], max_len: int = 32) -> bytes:
         return b""
 
     first = non_empty[0]
-    if first.startswith((ZIP_MAGIC, b"\x1f\x8b")) or first[:4] in SPIDERMONKEY_MAGICS:
+    if first.startswith((ZIP_MAGIC, b"\x1f\x8b") + LUA_MAGICS) or first[:4] in SPIDERMONKEY_MAGICS:
         return b""
 
     prefix = bytearray()
@@ -147,11 +148,14 @@ def xor_decrypt(data: bytes, xor_key: bytes, sign: bytes = b"") -> bytes:
 
 
 def unpack_payload(data: bytes) -> tuple[bytes, str]:
-    """Returns (body, kind) where kind is 'zip', 'gzip' (decompressed), 'bytecode', or 'raw'."""
+    """Returns (body, kind): kind is 'zip', 'gzip' (decompressed), 'bytecode' (SpiderMonkey),
+    'luabytecode', or 'raw'."""
     if data.startswith(ZIP_MAGIC):
         return data, "zip"
     if data[:4] in SPIDERMONKEY_MAGICS:
         return data, "bytecode"
+    if data.startswith(LUA_MAGICS):
+        return data, "luabytecode"
     try:
         return zlib.decompress(data, 15 + 32), "gzip"
     except zlib.error:
@@ -161,7 +165,7 @@ def unpack_payload(data: bytes) -> tuple[bytes, str]:
 def looks_like_script(body: bytes, kind: str) -> bool:
     if not body:
         return False
-    if kind in ("gzip", "zip", "bytecode"):
+    if kind in ("gzip", "zip", "bytecode", "luabytecode"):
         return True
     if body[:4] in SPIDERMONKEY_MAGICS:
         return True

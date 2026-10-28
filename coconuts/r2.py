@@ -1,7 +1,8 @@
 """
 radare2 analysis (with O(1) symbol & .data.rel.ro vtable fast paths).
 
-Resolves the XXTEA key / evalString / setXXTeaKey functions in a stripped arm64 libcocos.so,
+Resolves the XXTEA key / evalString / setXXTeaKey functions in a stripped arm64 libcocos.so (and the
+xxtea_decrypt / luaL_loadbuffer symbols in libcocos2dlua.so),
 and provides the abort guard used to kill a running radare2 subprocess when the other track wins.
 """
 
@@ -114,10 +115,12 @@ def r2_open_and_analyse(
             symbols = r2.cmdj("isj") or []
             if abort_event and abort_event.is_set():
                 return r2, "", [], symbols
+            # Cocos2dxJavascriptJavaBridge (JS engines) or Cocos2dxLuaJavaBridge (Lua engines)
             bridge = sorted({m.group(0) for s in symbols
-                             for m in [re.search(r"Java_\w*JavascriptJavaBridge\w*", s.get("name", ""))] if m})
+                             for m in [re.search(r"Java_\w*(?:Javascript|Lua)JavaBridge\w*", s.get("name", ""))] if m})
             if not bridge:
-                raise RuntimeError("No JavascriptJavaBridge JNI export found; this doesn't look like a cocos2d-js lib")
+                raise RuntimeError("No JavascriptJavaBridge / LuaJavaBridge JNI export found; "
+                                   "this doesn't look like a Cocos engine lib")
             if len(bridge) > 1:
                 flog.debug("Multiple bridge symbols %s; using %s", bridge, bridge[0])
             cocos_symbol = bridge[0]

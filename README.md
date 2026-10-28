@@ -7,7 +7,7 @@
 <p align="center">Dump and decrypt Cocos2d-x / Cocos Creator scripts and assets from an Android app.</p>
 
 Cocos2d-x and Cocos Creator games ship their JavaScript game logic inside the APK as encrypted `.jsc`
-files, usually XXTEA with the key compiled into the native engine library. **coconuts** recovers that
+files (Lua games as `.luac`), usually XXTEA with the key compiled into the native engine library. **coconuts** recovers that
 key, either by reading it out of the library statically, by catching it at runtime with Frida, or
 both at once. It then writes the decrypted scripts to a folder you can read, diff and grep. For
 AES-protected builds it decrypts every asset, not just the scripts.
@@ -19,7 +19,7 @@ AES-protected builds it decrypts every asset, not just the scripts.
 - **Three encryption schemes.** Cocos XXTEA (with or without a signature prefix), repeating-key XOR,
   and x-studio / axmol `EncryptManager` AES-256-CBC.
 - **Fails soft.** Discovered keys are checked against real files before they're used. When nothing
-  works you still get the raw `.jsc` files, and a missing device, Frida or radare2 only disables the
+  works you still get the raw script files, and a missing device, Frida or radare2 only disables the
   part that needs it.
 
 ## Contents
@@ -55,10 +55,10 @@ without knowing in advance how that particular build protects its scripts.
 
 Non-goals:
 
-- **Decompiling.** Compiled SpiderMonkey bytecode is written out as-is (`.mozjs.jsc`), and bundled or
-  minified JS is not beautified.
-- **Lua, iOS or HTML5 builds.** coconuts handles Android builds that use the JavaScript engine (`.jsc`
-  scripts). Cocos2d-x Lua games (`.luac`) are out of scope.
+- **Decompiling.** Compiled SpiderMonkey bytecode is written out as-is (`.mozjs.jsc`), and so are
+  compiled Lua chunks (`.luac`). Minified JS can be reformatted with `--pretty`, but not de-obfuscated.
+- **iOS or HTML5 builds.** coconuts handles Android builds, with the JavaScript engine (`.jsc` scripts)
+  or the Lua engine (`.luac`; see [Lua games](#lua-games)).
 - **Bypassing anti-tamper.** If a game detects Frida or root and exits, the dynamic track fails. The
   static track still runs.
 
@@ -122,8 +122,9 @@ SpiderMonkey bytecode.
 ### Dynamic track
 
 1. **Resolve hook targets with radare2.**
-   - The library must be arm64 and export a `Java_…JavascriptJavaBridge…` JNI symbol. That symbol
-     identifies the Cocos JS engine, and the hook uses it at runtime to recognise the right library.
+   - The library must be arm64 and export a `Java_…JavascriptJavaBridge…` (or, for Lua engines,
+     `Java_…LuaJavaBridge…`) JNI symbol. That symbol identifies the Cocos engine, and the hook uses it
+     at runtime to recognise the right library.
    - The **key function** is `xxtea_decrypt` from the symbol table. If that symbol is missing,
      coconuts tries the `setXXTeaKey` slot in `.data.rel.ro`. As a last resort it runs a full radare2
      analysis (`aap; aaef`), finds the function that references `"Can't decrypt code for %s"`, and
@@ -151,18 +152,44 @@ SpiderMonkey bytecode.
   `setXXTEAKeyAndSign`). coconuts detects the common prefix across files and strips it. Override with
   `--sign`.
 - **Unpacking.** After decryption, gzip streams are inflated. Zip archives (Creator's "zip compress"
-  option) are saved as `.zip`, SpiderMonkey bytecode as `.mozjs.jsc`, and plain text as `.js`.
+  option) are saved as `.zip`, SpiderMonkey bytecode as `.mozjs.jsc`, and plain text as `.js`. Lua
+  scripts become `.lua` when they're source, and stay `.luac` when they're compiled bytecode.
 - **Live dumps win.** A file already written by a live dump isn't overwritten, since the live copy is
   what the game actually ran.
 - **AES mode.** `EncryptManager` encrypts every asset type, so every asset is processed. The key is
-  first verified against the `.jsc` files. Assets that then don't decrypt are genuinely unencrypted
+  first verified against the encrypted scripts. Assets that then don't decrypt are genuinely unencrypted
   and are copied verbatim.
+
+### Lua games
+
+Cocos2d-x Lua games encrypt their scripts with the same Cocos XXTEA as JS games, set up by
+`LuaStack::setXXTEAKeyAndSign(key, sign)` in `AppDelegate::applicationDidFinishLaunching`. The
+signature is often the template default `XXTEA`. coconuts treats them like `.jsc` files, with a few
+differences:
+
+- **Scripts.** `.luac` files are collected, and `.lua` files too, since the Lua loader decrypts any
+  file that starts with the signature. Scripts shipped unencrypted (plain source, or bytecode starting
+  with `\x1bLua` / `\x1bLJ`) are copied as-is and don't need a key.
+- **Engine library.** `libcocos2dlua.so`, also tried by default when the library is read from the APK.
+- **Static track.** The same tiers, with `main.lua` as an extra anchor. The Tier 0 radare2 pass reads
+  the literals in `applicationDidFinishLaunching`, where Lua games pass their key.
+- **Frida track.** Hooks `xxtea_decrypt` and `LuaStack::setXXTEAKeyAndSign` for the key (the signature
+  is logged too), and `luaL_loadbufferx` / `luaL_loadbuffer` for live dumps of every chunk the game
+  loads. Chunks loaded from a zip bundle are named after their module (`app.MyApp.lua`).
+- **Bytecode.** Many Lua games ship compiled bytecode rather than source. It's decrypted and written
+  as `.luac` for a decompiler such as [unluac](https://sourceforge.net/projects/unluac/) (PUC Lua) or
+  [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2) (LuaJIT).
+
+Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
+hooks in particular are untested. Script bundles shipped as one encrypted zip (loaded with
+`loadChunksFromZIP`, often `game.zip` / `src.zip`) aren't collected yet.
 
 ## Supported encryption schemes
 
 | Scheme | Where it's used | How coconuts gets the key |
 |---|---|---|
 | **Cocos XXTEA** (`.jsc`), optionally with a signature prefix | Cocos2d-x JS and Cocos Creator native builds with "encrypt JS" enabled | Static tiers, Frida hooks, or `--key` |
+| **Cocos XXTEA** (`.luac` / `.lua`), optionally with a signature prefix (often `XXTEA`) | Cocos2d-x Lua builds (`LuaStack::setXXTEAKeyAndSign`) | Static tiers, Frida hooks, or `--key` |
 | **Repeating-key XOR** (`.jsc`) | Some modified Cocos2d-js engines | Known-plaintext attack (automatic) |
 | **EncryptManager AES-256-CBC** (all assets) | x-studio / axmol `EncryptManager::setEncryptEnabled` | Frida hook, or `--aes-key` / `--aes-iv` |
 
@@ -213,6 +240,7 @@ The first argument is the game's **arm64** native engine library:
 
 - `libcocos.so` for Cocos Creator 3.x
 - `libcocos2djs.so` for Cocos2d-x JS and Cocos Creator 2.x
+- `libcocos2dlua.so` for Cocos2d-x Lua
 
 Pull it from the installed app:
 
@@ -348,7 +376,7 @@ coconuts [options] [LIB] [PACKAGE] [OUTPUT]
 
 - `LIB` is the arm64 engine library. With `--apk` you can leave it off: coconuts reads the library's
   name from the APK manifest (`android.app.lib_name`, so it also handles builds where it isn't
-  `libcocos.so` / `libcocos2djs.so`) and pulls the matching `lib/arm64-v8a/*.so` out of the APK.
+  `libcocos.so` / `libcocos2djs.so` / `libcocos2dlua.so`) and pulls the matching `lib/arm64-v8a/*.so` out of the APK.
   Otherwise it's required.
 - `PACKAGE` is the app's package name. It's used to pull the APKs and to spawn the game. With `--apk`
   it's read from the manifest, so you can leave it off; it's still required when coconuts pulls from
@@ -371,7 +399,7 @@ coconuts ./libcocos.so com.example.game ./out --device emulator-5554
 # Slow-starting game: wait longer for the key, then keep dumping hot-updated scripts for a minute
 coconuts ./libcocos.so com.example.game ./out --timeout 60 --live-seconds 60
 
-# No device at all: static search against a local APK, or a folder of .jsc files
+# No device at all: static search against a local APK, or a folder of .jsc / .luac files
 coconuts ./libcocos.so com.example.game ./out --static-only --apk ./base.apk
 coconuts ./libcocos.so com.example.game ./out --static-only --apk ./unzipped_apk/
 
@@ -414,7 +442,7 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--live-seconds SEC` | `5` | How long to keep the Frida session open after the key, collecting scripts as the game evaluates them. Ctrl-C ends it early and moves on to decryption. |
 | `--static-only` | off | Skip Frida entirely. |
 | `--key KEY` | — | A known XXTEA key, as text. It's zero-padded or truncated to 16 bytes, as Cocos does. Skips key discovery. |
-| `--sign SIGN` | auto-detect | The signature prefix to strip from every `.jsc`. `--sign ''` disables stripping. |
+| `--sign SIGN` | auto-detect | The signature prefix to strip from every encrypted script. `--sign ''` disables stripping. |
 | `--aes-key HEX` | — | An EncryptManager AES key. Switches to AES mode, which processes every asset. |
 | `--aes-iv HEX` | 16 × `0x01` | The AES IV. The default is EncryptManager's value for an empty IV. |
 | `--aes-roll N` | `5` | The signature roll count. Read from the captured flags automatically when Frida catches the key. |
@@ -426,8 +454,8 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 
 ## Output
 
-The output folder mirrors the APK's `assets/` tree, with `.jsc` renamed to `.js`. For example
-(paths depend on the game):
+The output folder mirrors the APK's `assets/` tree, with `.jsc` renamed to `.js` (and `.luac` to
+`.lua` for Lua source). For example (paths depend on the game):
 
 ```
 out/
@@ -439,7 +467,18 @@ out/
 │   └── jsb-builtin.js
 ├── src/bundle.js.zip             # payload was a zip archive ("zip compress" builds)
 ├── src/legacy.js.mozjs.jsc       # payload was compiled SpiderMonkey bytecode
-└── raw_jsc/                      # only when no key worked: the untouched .jsc files
+└── raw_scripts/                  # only when no key worked: the untouched encrypted scripts
+```
+
+A Lua game looks like this:
+
+```
+out/
+├── src/
+│   ├── main.lua                  # decrypted from assets/src/main.luac, Lua source
+│   ├── app/MyApp.luac            # decrypted, but the payload is compiled Lua (LuaJIT) bytecode
+│   └── cocos/init.luac           # shipped unencrypted: copied as-is
+└── raw_scripts/
 ```
 
 - **Live dumps** from Frida land in the same folder, under the path the engine reported. That's how
@@ -454,13 +493,13 @@ out/
 [*] Racing the static key search against Frida...
 [*] frida: xxtea_decrypt found in the symbol table at 0x1a2b3c0
 [*] frida: Spawning com.example.game on Android Emulator 5554
-[*] static: Found 214 .jsc asset(s) across 1 input path(s).
+[*] static: Found 214 script(s) across 1 input path(s).
 [*] frida: Hooks installed in libcocos.so @ 0x7a1c000000
 [+] frida: Key captured: '1a2b3c4d-5e6f-7a'
 [*] static: Frida captured the key first; stopping the static search.
 [*] frida: Collecting live dumps for 5s more (Ctrl-C to stop early)...
 [+] frida: Saved 37 live script dump(s) to ./out
-[+] frida: Key verified against 3 .jsc file(s).
+[+] frida: Key verified against 3 script(s).
 [*] Decrypting 214 asset(s) into './out' with XXTEA key '1a2b3c4d-5e6f-7a'...
 [+] Done: 177 file(s) decrypted to ./out, 37 skipped (already dumped live).
 ```
@@ -473,7 +512,7 @@ prefixed `static:` and `frida:`.
 
 | Code | Meaning |
 |---|---|
-| `0` | The run completed. **This includes runs where no key worked.** Look for `[-] No working key found` and an `OUTPUT/raw_jsc/` folder. |
+| `0` | The run completed. **This includes runs where no key worked.** Look for `[-] No working key found` and an `OUTPUT/raw_scripts/` folder. |
 | `1` | coconuts couldn't start or couldn't get its inputs. For example: the library path doesn't exist, `--aes-key` / `--aes-iv` aren't valid hex, adb or the device is unusable, or no APKs could be obtained. |
 | `130` | Interrupted with Ctrl-C outside the Frida wait. Ctrl-C during the Frida wait only ends the capture early, and decryption still runs. |
 
@@ -491,8 +530,8 @@ Each message says what to do. To leave the device out entirely, use `--static-on
 The dynamic track couldn't start. Common causes:
 - frida-server isn't running, isn't root, or doesn't match the installed `frida` version.
 - radare2 isn't installed.
-- The library isn't arm64 (`Only arm64 libs are supported`), or isn't a Cocos JS engine
-  (`No JavascriptJavaBridge JNI export found`).
+- The library isn't arm64 (`Only arm64 libs are supported`), or isn't a Cocos engine
+  (`No JavascriptJavaBridge / LuaJavaBridge JNI export found`).
 
 Run with `-v` for the full error. The static track carries on regardless.
 
@@ -504,17 +543,17 @@ Some games only load their scripts after a splash or login screen. Raise `--time
 emulator this is expected, because the Frida track can't hook games there. Use `--static-only`
 instead (see [Linux and x86 PCs](#linux-and-x86-pcs)).
 
-**`Captured key … doesn't decrypt the APK's .jsc files; ignoring it.`**
+**`Captured key … doesn't decrypt the APK's scripts; ignoring it.`**
 The hook caught some other XXTEA call. coconuts re-runs the full static search automatically.
 
 **`No working key found…`** or **`Every file failed to decrypt…`**
-The raw files are saved in `OUTPUT/raw_jsc/`. Things to try:
+The raw files are saved in `OUTPUT/raw_scripts/`. Things to try:
 - `-v` to see why each file failed.
 - A longer Frida run.
 - An explicit `--sign` if the prefix detection guessed wrong.
 - `--key`, if you found the key some other way.
 
-**`The AES key/iv/roll doesn't decrypt the .jsc assets`**
+**`The AES key/iv/roll doesn't decrypt the encrypted scripts`**
 Double-check the IV and `--aes-roll`. Use exactly the values from Frida's `AES key captured: … iv=… (roll=…)` line.
 
 **Hot-updated scripts are missing**
@@ -531,8 +570,10 @@ downloads them.
   Unusual or heavily obfuscated builds may need the Frida track or `--key`.
 - **The dynamic track needs root and frida-server.** Games with anti-root or anti-Frida checks may
   exit before the key is captured.
-- **XXTEA and XOR modes only process `.jsc` files.** Other assets are only handled in AES mode.
-- **SpiderMonkey bytecode isn't decompiled.**
+- **XXTEA and XOR modes only process scripts** (`.jsc`, `.luac`, `.lua`). Other assets are only
+  handled in AES mode.
+- **SpiderMonkey and Lua bytecode aren't decompiled.**
+- **Lua support hasn't been tested against a real game yet.** See [Lua games](#lua-games).
 - **With `--pretty`, every `.js` file is reformatted in place**, live dumps included. The minified
   originals aren't kept.
 

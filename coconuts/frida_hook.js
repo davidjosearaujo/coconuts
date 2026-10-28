@@ -67,6 +67,53 @@ function findExportMatching(lib, substrings) {
     return null;
 }
 
+// Exported first, then the full symbol table (Lua is linked into the engine lib and may not be exported)
+function findFunction(lib, name) {
+    var addr = lib.findExportByName(name);
+    if (addr !== null) return addr;
+    try {
+        var syms = lib.enumerateSymbols();
+        for (var i = 0; i < syms.length; i++) {
+            if (syms[i].name === name && !syms[i].address.isNull()) return syms[i].address;
+        }
+    } catch (e) {}
+    return null;
+}
+
+// Reads a (const char *, int len) pair, or a NUL-terminated string when the length slot isn't a
+// plausible length (an overload that takes bare C strings).
+function readCharsAndLen(p, lenArg) {
+    if (p.isNull()) return null;
+    var len = lenArg.toUInt32();
+    if (len > 0 && len <= MAX_KEY_LEN) return p.readByteArray(len);
+    var s = p.readCString();
+    if (!s || s.length > MAX_KEY_LEN) return null;
+    return p.readByteArray(s.length);
+}
+
+// Lua chunk names are file paths ('@src/main.lua') or module names ('app.MyApp'); luaL_loadstring
+// passes the source itself as the name, which this rejects.
+var LUA_CHUNK_NAME = /^[@=]?[\w.\/\\-]{1,255}$/;
+
+function hookLuaLoadBuffer(addr) {
+    // luaL_loadbuffer(L, const char *buff, size_t sz, const char *name) (luaL_loadbufferx adds mode)
+    Interceptor.attach(addr, {
+        onEnter: function (args) {
+            try {
+                var buff = args[1], name = args[3];
+                if (buff.isNull() || name.isNull()) return;
+                var path = name.readCString();
+                if (!path || !LUA_CHUNK_NAME.test(path)) return;
+                var len = args[2].toUInt32();
+                if (len === 0) return;
+                send({type: 'file', path: path, lang: 'lua'}, buff.readByteArray(len));
+            } catch (e) {
+                send({type: 'log', level: 'debug', msg: 'lua dump hook: ' + e});
+            }
+        }
+    });
+}
+
 function installHooks(lib) {
     hooked = true;
     var base = lib.base;
@@ -77,7 +124,15 @@ function installHooks(lib) {
         : (findExportMatching(lib, ['ScriptEngine', 'evalString']) ||
            findExportMatching(lib, ['ScriptingCore', 'evalString']));
 
-    if (dumpAddr !== null) {
+    // Lua engines: hook the loader that every chunk goes through after decryption. luaL_loadbuffer
+    // is a wrapper (LuaJIT) or a macro (Lua 5.2+) around luaL_loadbufferx, so hook only one of them.
+    var luaLoadAddr = (dumpAddr === null)
+        ? (findFunction(lib, 'luaL_loadbufferx') || findFunction(lib, 'luaL_loadbuffer'))
+        : null;
+
+    if (luaLoadAddr !== null) {
+        hookLuaLoadBuffer(luaLoadAddr);
+    } else if (dumpAddr !== null) {
         Interceptor.attach(dumpAddr, {
             onEnter: function (args) {
                 try {
@@ -97,7 +152,7 @@ function installHooks(lib) {
             }
         });
     } else {
-        send({type: 'log', level: 'warning', msg: 'No evalString hook found; live script dumps disabled (key capture only).'});
+        send({type: 'log', level: 'warning', msg: 'No evalString / luaL_loadbuffer hook found; live script dumps disabled (key capture only).'});
     }
 
     // 2. XXTEA Key Hook: xxtea_decrypt or setXXTeaKey / jsb_set_xxtea_key
@@ -142,6 +197,26 @@ function installHooks(lib) {
                         keySent = true;
                     }
                 } catch (e) {}
+            }
+        });
+    }
+
+    // Lua engines: LuaStack::setXXTEAKeyAndSign(this, const char *key, int keyLen, const char *sign, int signLen)
+    var luaKeyExp = findExportMatching(lib, ['LuaStack', 'setXXTEAKeyAndSign']);
+    if (luaKeyExp !== null && (keyAddr === null || !luaKeyExp.equals(keyAddr))) {
+        Interceptor.attach(luaKeyExp, {
+            onEnter: function (args) {
+                if (keySent) return;
+                try {
+                    var key = readCharsAndLen(args[1], args[2]);
+                    if (!key) return;
+                    var sign = null;
+                    try { sign = readCharsAndLen(args[3], args[4]); } catch (e) {}
+                    send({type: 'key', key: toHex(key), sign: sign ? toHex(sign) : ''});
+                    keySent = true;
+                } catch (e) {
+                    send({type: 'log', level: 'debug', msg: 'lua key hook: ' + e});
+                }
             }
         });
     }

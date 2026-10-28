@@ -41,6 +41,7 @@ _KEY_EXCLUDE = {
     "applicationDidFinishLaunching",
     "jsb-adapter/jsb-builtin.js",
     "jsb-adapter/jsb-engine.js",
+    "src/main.lua",
 }
 
 
@@ -78,6 +79,8 @@ def extract_r2_priority_keys(
     Tier 0 ('Framework: Cocos2d-js'):
     Extracts string literals referenced directly inside AppDelegate::applicationDidFinishLaunching
     or jsb_set_xxtea_key callers via lightweight single-function r2 disassembly (no `aap; aaef`).
+    Lua games pass their literal key to LuaStack::setXXTEAKeyAndSign from the same AppDelegate
+    function, so this covers them too.
     """
     if abort_event and abort_event.is_set():
         return []
@@ -153,7 +156,7 @@ def find_possible_keys(
         return []
 
     # Tier 1a: Immediate 128-byte pre-window before 'main.js\0' and '<sig_prefix>\0'
-    tight_anchors = [b"main.js\x00", b"jsb-adapter/jsb-builtin.js\x00", b"0.0.0.0\x00"]
+    tight_anchors = [b"main.js\x00", b"jsb-adapter/jsb-builtin.js\x00", b"main.lua\x00", b"0.0.0.0\x00"]
     if sig_prefix:
         tight_anchors.insert(0, sig_prefix + b"\x00")
 
@@ -167,7 +170,8 @@ def find_possible_keys(
             idx += len(anchor)
 
     # Tier 1b: Wider 512-byte neighborhood around Cocos boot strings
-    for anchor in (b"main.js\x00", b"jsb-adapter", b"jsb_polyfill", b"project.jsc", b"0.0.0.0\x00"):
+    for anchor in (b"main.js\x00", b"jsb-adapter", b"jsb_polyfill", b"project.jsc", b"main.lua\x00",
+                   b"0.0.0.0\x00"):
         idx = 0
         while (idx := data.find(anchor, idx)) != -1:
             window = data[max(0, idx - 512): min(len(data), idx + 512)]
@@ -206,7 +210,7 @@ def find_possible_keys(
 
 
 def _key_samples(entries: dict[str, bytes], count: int = 3) -> list[bytes]:
-    """Smallest .jsc files (>= 64 bytes when possible): fastest to trial-decrypt."""
+    """Smallest encrypted scripts (>= 64 bytes when possible): fastest to trial-decrypt."""
     by_size = sorted(entries.values(), key=len)
     pool = [blob for blob in by_size if len(blob) >= 64] or by_size
     return pool[:count]

@@ -6,7 +6,7 @@ parse just enough of that format to pull out two things:
 
 - the ``package`` attribute of ``<manifest>`` (so ``PACKAGE`` can be omitted on the command line), and
 - the ``android.app.lib_name`` ``<meta-data>`` value, which names the engine library when it isn't the
-  usual ``libcocos.so`` / ``libcocos2djs.so`` (so ``LIB`` can be omitted too).
+  usual ``libcocos.so`` / ``libcocos2djs.so`` / ``libcocos2dlua.so`` (so ``LIB`` can be omitted too).
 
 With the library's base name in hand we fish the matching ``lib/<abi>/lib<name>.so`` out of the APK zip
 and write it to a temp file for the static key search to read.
@@ -37,7 +37,7 @@ _ATTR_ID_VALUE = 0x01010024
 _ABI_PRIORITY = ("arm64-v8a", "armeabi-v7a", "x86_64", "x86")
 
 # Tried when the manifest doesn't name the library (older Cocos builds omit android.app.lib_name).
-_DEFAULT_LIB_NAMES = ("libcocos.so", "libcocos2djs.so")
+_DEFAULT_LIB_NAMES = ("libcocos.so", "libcocos2djs.so", "libcocos2dlua.so")
 
 
 def _pool_get(strings: list[str], idx: int) -> str:
@@ -243,7 +243,7 @@ def extract_engine_lib(apk_paths: list[str], lib_name: str | None, dest_dir: str
 
     Prefers the arm64 ABI and the library named by ``android.app.lib_name``, then the usual Cocos
     names. Returns None if no matching library is bundled (e.g. it's in an ABI split that wasn't
-    passed, or ``--apk`` pointed at a bare folder of ``.jsc`` files).
+    passed, or ``--apk`` pointed at a bare folder of scripts).
     """
     candidates = _lib_candidates(lib_name)
     # Pick the winner by name alone (arm64 + the manifest-named lib first), then stream only that one

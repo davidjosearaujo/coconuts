@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Cocos2d-x Lua games: `.luac` (and `.lua`) scripts are decrypted with the
+  same Cocos XXTEA as `.jsc`. Lua source is written as `.lua`; compiled Lua /
+  LuaJIT bytecode stays `.luac`. Scripts shipped unencrypted are copied as-is
+  without needing a key. Not yet tested against a real Lua game.
+- `libcocos2dlua.so` is recognised as an engine library (default name when
+  reading it from the APK, and `Cocos2dxLuaJavaBridge` as its JNI marker).
+- Static key search: `main.lua` is an extra Tier 1 anchor.
+- Frida: hooks `LuaStack::setXXTEAKeyAndSign` for the key (and logs the
+  signature), and `luaL_loadbufferx` / `luaL_loadbuffer` for live Lua dumps.
+
+### Changed
+- When no key works, the untouched scripts go to `raw_scripts/` instead of
+  `raw_jsc/`, and log messages say "script(s)" instead of ".jsc".
+
 ## [1.1.0] - 2026-10-28
 
 ### Added

@@ -1,4 +1,8 @@
-"""Offline extraction: asset collection from APKs/dirs, path safety, and the XXTEA/XOR/AES decrypt loops."""
+"""Offline extraction: script collection from APKs/dirs, path safety, and the XXTEA/XOR/AES decrypt loops.
+
+Scripts are Cocos JS (.jsc) and Cocos Lua (.luac, and .lua: the Lua loader decrypts any chunk that
+starts with the signature, whatever its extension).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ import zipfile
 
 from .aes import cocos_aes_decrypt
 from .ciphers import (
+    LUA_MAGICS,
     cocos_xxtea_decrypt,
     describe_key,
     detect_signature_prefix,
@@ -27,8 +32,59 @@ def safe_join(base: str, rel: str) -> str:
     return target
 
 
+SCRIPT_EXTS = (".jsc", ".luac", ".lua")
+RAW_FALLBACK_DIR = "raw_scripts"
+
+
 def jsc_to_js(path: str) -> str:
     return path[:-1] if path.lower().endswith(".jsc") else path
+
+
+def output_name(rel: str, kind: str) -> str:
+    """Output path for a decrypted script: .jsc -> .js, .luac -> .lua, plus a suffix for what the
+    payload turned out to be (zip archive, SpiderMonkey bytecode, or a compiled Lua chunk)."""
+    base = rel[:-1] if rel.lower().endswith((".jsc", ".luac")) else rel
+    if kind == "zip":
+        return base + ".zip"
+    if kind == "bytecode":
+        return base + ".mozjs.jsc"
+    if kind == "luabytecode" and base.lower().endswith(".lua"):
+        return base + "c"  # still compiled: keep .luac, now decrypted
+    return base
+
+
+def lua_live_name(chunk_name: str, body: bytes) -> str:
+    """Output path for a live Lua dump. Chunk names are file paths ('@src/main.lua'), sometimes with
+    an assets/ prefix, or module names ('app.MyApp') for scripts loaded from a zip bundle."""
+    name = chunk_name.lstrip("@=")
+    if name.startswith("assets/"):
+        name = name[len("assets/"):]
+    if not name.lower().endswith((".lua", ".luac")):
+        name += ".lua"
+    return output_name(name, "luabytecode" if body.startswith(LUA_MAGICS) else "raw")
+
+
+def is_plain_script(rel: str, blob: bytes) -> bool:
+    """True for Lua scripts shipped unencrypted (compiled bytecode or source text), which the Lua
+    loader runs as-is. .jsc files are always encrypted, so this is False for them."""
+    if not rel.lower().endswith((".luac", ".lua")):
+        return False
+    if blob.startswith(LUA_MAGICS):
+        return True
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return bool(text) and all(c.isprintable() or c in "\t\r\n" for c in text)
+
+
+def split_plain_scripts(entries: dict[str, bytes]) -> tuple[dict[str, bytes], dict[str, bytes]]:
+    """Splits entries into (encrypted, plain); only the encrypted ones need a key."""
+    encrypted: dict[str, bytes] = {}
+    plain: dict[str, bytes] = {}
+    for rel, blob in entries.items():
+        (plain if is_plain_script(rel, blob) else encrypted)[rel] = blob
+    return encrypted, plain
 
 
 def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
@@ -63,19 +119,19 @@ def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
     return entries
 
 
-def collect_jsc_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
-    """Collects .jsc files from APK zip(s) or directly from local directory path(s)."""
-    return _collect_entries(stack, apk_paths, lambda rel: rel.endswith(".jsc"))
+def collect_script_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
+    """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s)."""
+    return _collect_entries(stack, apk_paths, lambda rel: rel.endswith(SCRIPT_EXTS))
 
 
 def collect_asset_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
-    """Collects every asset file (EncryptManager AES wraps all asset types, not only .jsc)."""
+    """Collects every asset file (EncryptManager AES wraps all asset types, not only scripts)."""
     return _collect_entries(stack, apk_paths, lambda rel: True)
 
 
-def save_raw_jsc_fallback(entries: dict[str, bytes], out_dir: str) -> None:
-    raw_dir = os.path.join(out_dir, "raw_jsc")
-    log.info("Saving %d undecrypted .jsc file(s) to %s for manual inspection.", len(entries), raw_dir)
+def save_raw_fallback(entries: dict[str, bytes], out_dir: str) -> None:
+    raw_dir = os.path.join(out_dir, RAW_FALLBACK_DIR)
+    log.info("Saving %d undecrypted script(s) to %s for manual inspection.", len(entries), raw_dir)
     for rel, blob in sorted(entries.items()):
         try:
             dst = safe_join(raw_dir, rel)
@@ -83,7 +139,28 @@ def save_raw_jsc_fallback(entries: dict[str, bytes], out_dir: str) -> None:
             with open(dst, "wb") as f:
                 f.write(blob)
         except (OSError, ValueError) as e:
-            log.warning("Could not save raw .jsc %s: %s", rel, e)
+            log.warning("Could not save raw script %s: %s", rel, e)
+
+
+def _write_plain_scripts(plain: dict[str, bytes], out_dir: str) -> int:
+    """Copies unencrypted Lua scripts to the output (renamed like decrypted ones); returns the count."""
+    if not plain:
+        return 0
+    log.info("%d Lua script(s) aren't encrypted; copying them as-is.", len(plain))
+    copied = 0
+    for rel, blob in sorted(plain.items()):
+        try:
+            out_path = safe_join(out_dir, output_name(rel, unpack_payload(blob)[1]))
+        except ValueError as e:
+            log.warning("Skipping: %s", e)
+            continue
+        if os.path.exists(out_path):  # live dumps take precedence
+            continue
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(blob)
+        copied += 1
+    return copied
 
 
 def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
@@ -95,20 +172,21 @@ def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
         log.warning("No asset files found in %d input path(s).", len(apk_paths))
         return 0
 
-    # .jsc assets are always encrypted, so verify the key against them: once confirmed, a file that
-    # doesn't decrypt is a genuinely unencrypted resource (copy-list) rather than a wrong-key failure.
-    jsc_entries = {rel: blob for rel, blob in entries.items() if rel.lower().endswith(".jsc")}
+    # Encrypted scripts are a safe test of the key: once it's confirmed, a file that doesn't decrypt
+    # is a genuinely unencrypted resource (copy-list) rather than a wrong-key failure.
+    script_entries, _ = split_plain_scripts(
+        {rel: blob for rel, blob in entries.items() if rel.lower().endswith(SCRIPT_EXTS)})
     verified: bool | None = None
-    if jsc_entries:
-        samples = _key_samples(jsc_entries)
+    if script_entries:
+        samples = _key_samples(script_entries)
         verified = any(cocos_aes_decrypt(s, aes_key, aes_iv, roll=aes_roll) is not None for s in samples)
         if not verified:
-            log.error("The AES key/iv/roll doesn't decrypt the .jsc assets (wrong key); nothing written.")
-            save_raw_jsc_fallback(jsc_entries, out_dir)
+            log.error("The AES key/iv/roll doesn't decrypt the encrypted scripts (wrong key); nothing written.")
+            save_raw_fallback(script_entries, out_dir)
             return 0
-        log.log(SUCCESS, "AES key verified against %d .jsc file(s).", len(samples))
+        log.log(SUCCESS, "AES key verified against %d script(s).", len(samples))
     else:
-        log.warning("No .jsc files to verify the AES key against; files that don't decrypt are copied as-is.")
+        log.warning("No encrypted scripts to verify the AES key against; files that don't decrypt are copied as-is.")
 
     log.info("Decrypting %d asset(s) into '%s' with EncryptManager AES-256-CBC key=%s iv=%s (roll=%d)...",
              len(entries), out_dir, aes_key.hex(), aes_iv.hex() or "<default>", aes_roll)
@@ -117,8 +195,7 @@ def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
         plain = cocos_aes_decrypt(raw_blob, aes_key, aes_iv, roll=aes_roll)
         if plain is not None:
             body, kind = unpack_payload(plain)
-            ext_suffix = ".zip" if kind == "zip" else (".mozjs.jsc" if kind == "bytecode" else "")
-            out_rel = jsc_to_js(rel) + ext_suffix
+            out_rel = output_name(rel, kind)
         else:
             body, out_rel = raw_blob, rel  # unencrypted resource (or unverifiable): preserve verbatim
         try:
@@ -158,17 +235,23 @@ def extract_offline(
         if aes is not None:
             return _extract_offline_aes(stack, apk_paths, aes, out_dir)
 
-        entries = preloaded_entries if preloaded_entries is not None else collect_jsc_entries(stack, apk_paths)
+        entries = preloaded_entries if preloaded_entries is not None else collect_script_entries(stack, apk_paths)
         if not entries:
-            log.warning("No .jsc files found in %d input path(s).", len(apk_paths))
+            log.warning("No .jsc / .luac / .lua files found in %d input path(s).", len(apk_paths))
             return 0
         if preloaded_entries is None:
-            log.info("Found %d .jsc asset(s) across %d input path(s).", len(entries), len(apk_paths))
+            log.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
+
+        entries, plain = split_plain_scripts(entries)
+        copied = _write_plain_scripts(plain, out_dir)
+        if not entries:
+            log.log(SUCCESS, "Done: none of the scripts are encrypted; %d copied to %s.", copied, out_dir)
+            return copied
 
         xor_key: bytes | None = None
         sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(entries.values()))
         if sign:
-            log.info("Detected %d-byte .jsc signature prefix: %r (hex: %s)", len(sign), sign, sign.hex())
+            log.info("Detected %d-byte script signature prefix: %r (hex: %s)", len(sign), sign, sign.hex())
 
         if key is None:
             xor_key = recover_xor_key_kp(entries, sign=sign)
@@ -179,7 +262,7 @@ def extract_offline(
 
             if key is None and xor_key is None:
                 log.error("No working key found; run with -v for details, or pass --key if you know it.")
-                save_raw_jsc_fallback(entries, out_dir)
+                save_raw_fallback(entries, out_dir)
                 return 0
 
         cipher_desc = f"XOR key {describe_key(xor_key)}" if xor_key else f"XXTEA key {describe_key(key)}"
@@ -197,8 +280,7 @@ def extract_offline(
                 log.debug("Decryption failed: %s", rel)
                 continue
             body, kind = unpack_payload(plain)
-            ext_suffix = ".zip" if kind == "zip" else (".mozjs.jsc" if kind == "bytecode" else "")
-            out_rel = jsc_to_js(rel) + ext_suffix
+            out_rel = output_name(rel, kind)
             try:
                 out_path = safe_join(out_dir, out_rel)
             except ValueError as e:
@@ -215,10 +297,10 @@ def extract_offline(
 
         if failed and not (written or skipped):
             log.error("Every file failed to decrypt; the key is probably wrong for these assets.")
-            save_raw_jsc_fallback(entries, out_dir)
-            return written
+            save_raw_fallback(entries, out_dir)
+            return written + copied
         log.log(SUCCESS, "Done: %d file(s) decrypted to %s, %d skipped (already dumped live).",
                 written, out_dir, skipped)
         if failed:
             log.warning("%d file(s) failed to decrypt (run with -v to list them).", failed)
-        return written
+        return written + copied

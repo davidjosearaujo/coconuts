@@ -1,5 +1,6 @@
 """
-Frida dynamic track (supports XXTEA, setXXTeaKey, AES EncryptManager, and XOR FileUtils::init).
+Frida dynamic track (supports XXTEA, setXXTeaKey, LuaStack::setXXTEAKeyAndSign, AES EncryptManager,
+and XOR FileUtils::init).
 
 Resolves the hook targets with radare2, loads the Frida hook (frida_hook.js) with the resolved
 offsets patched in, spawns the app, and races key/AES capture against the static track.
@@ -17,7 +18,7 @@ import time
 
 from .aes import aes_roll_from_flags
 from .ciphers import describe_key, normalize_key
-from .extract import jsc_to_js, safe_join
+from .extract import jsc_to_js, lua_live_name, safe_join
 from .log import SUCCESS, flog
 from .r2 import (
     EVAL_STRING_NEEDLES,
@@ -210,6 +211,9 @@ def run_frida_race(
                 return
             key_box["key"] = key
             flog.log(SUCCESS, "Key captured: %s", describe_key(key))
+            if p.get("sign"):
+                with contextlib.suppress(ValueError):
+                    flog.info("Signature passed with the key: %r", bytes.fromhex(p["sign"]))
             if dynamic_won is not None:
                 dynamic_won.set()
             key_event.set()
@@ -235,7 +239,7 @@ def run_frida_race(
             if not path:
                 return
             body = data if data is not None else (p.get("text") or "").encode("utf-8", errors="replace")
-            writer.submit(jsc_to_js(path), body)
+            writer.submit(lua_live_name(path, body) if p.get("lang") == "lua" else jsc_to_js(path), body)
         elif kind == "log":
             level = {"debug": logging.DEBUG, "warning": logging.WARNING}.get(p.get("level"), logging.INFO)
             flog.log(level, "%s", p.get("msg"))
