@@ -9,12 +9,6 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   LuaJIT sources (`tests/fixtures/android/`). What is still untested is a *shipped* game — the
   APK-side paths (`--static-only`, `--key`, the full static + Frida race, assets collected from a
   real `assets/` tree) and whatever a real build does differently from Cocos's upstream source.
-- [ ] **Frida: `LuaStack::setXXTEAKeyAndSign` overloads.** The layout
-  `(this, const char *key, int keyLen, const char *sign, int signLen)` is the one in cocos2d-x v3,
-  3.17.2 and 4.x `CCLuaStack.cpp`, and the hook reads it correctly on real arm64 hardware, both
-  with real lengths and with the lengths passed as 0, where it falls back to reading NUL-terminated
-  strings (`HARNESS_ZERO_LEN_KEY=1` in the fixture harness). What is still unchecked is a fork
-  declaring a different overload; there is none in upstream Cocos.
 - [ ] **Frida: vtable fallback when the key setter is stripped.** The slot index is no longer a
   guess: `cocos2d::Ref` declares exactly one virtual member (its destructor), and `LuaStack`
   declares 30 more in a fixed order, which puts `setXXTEAKeyAndSign` at **slot 29** — `+0x74` with
@@ -51,6 +45,7 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 ## General
 
 - [ ] **Tests for what isn't covered yet.** `find_key_function` and `find_string_xref_function`
-  in `r2.py`, which need a library carrying the needle strings and realistic call graphs, and
-  `decompile.py` against the real decompilers rather than stand-ins (it skips them unless
-  `$UNLUAC_JAR` / `$LUAJIT_DECOMPILER` are set).
+  in `r2.py`, which need a library carrying the needle strings and realistic call graphs. For
+  `decompile.py`, the LuaJIT half now runs against the real luajit-decompiler-v2 when
+  `$LUAJIT_DECOMPILER` points at its release `.exe`; the PUC half still needs a built unluac jar
+  in `$UNLUAC_JAR`, and falls back to a stand-in decompiler without one.
