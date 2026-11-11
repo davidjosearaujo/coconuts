@@ -33,11 +33,8 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   `game.zip` / `src.zip`, under any extension), loaded with `LuaStack::loadChunksFromZIP`. Collect
   those assets, decrypt them with the same key and signature, and unpack the entries into the output
   folder (the entries can themselves be plain or encrypted).
-- [ ] **Use the signature the Frida hook captures.** The static path now reads the key and
-  signature together from the `setXXTEAKeyAndSign` call site (`arm64.py`) and uses both, but the
-  Frida hook still only logs the signature it sees: the dynamic track returns a key alone, so a
-  Frida win still falls back to guessing the signature from a common prefix. Plumb it through
-  `frida_dump` the way the static pair is plumbed through `extract_offline`.
+- [x] **Use the signature the Frida hook captures.** Fixed in 2.0.1: the signature the hook sees
+  is kept, tried first when the captured key is verified, and used for offline extraction.
 - [ ] **radare2 fallback for stripped Lua libraries.** `DECRYPT_FAIL_NEEDLES` and `EVAL_STRING_NEEDLES`
   in `r2.py` are JS-only strings, so the heavy analysis can't locate `xxtea_decrypt` or the loader in a
   stripped `libcocos2dlua.so`. Find Lua-side strings to anchor on. The symbol search is JS-only too:

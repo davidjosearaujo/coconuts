@@ -22,7 +22,13 @@ from .ciphers import (
     describe_key,
     normalize_key,
 )
-from .extract import choose_signature, collect_scripts, extract_offline, split_plain_scripts
+from .extract import (
+    choose_signature,
+    collect_scripts,
+    extract_offline,
+    split_plain_scripts,
+    verify_captured_key,
+)
 from .frida_dump import FileWriter, build_frida_script, resolve_frida_targets, run_frida_race
 from .log import SUCCESS, ConsoleFormatter, flog, log, slog, use_color
 from .decompile import decompile_dir
@@ -295,6 +301,7 @@ def main(argv=None) -> int:
 
             dyn_key: bytes | None = None
             aes_box: dict = {}
+            sign_box: dict = {}
             writer = FileWriter(args.output)
             try:
                 if key is None and not static_won.is_set():
@@ -313,7 +320,7 @@ def main(argv=None) -> int:
                                 dyn_key = run_frida_race(
                                     device, args.package, script_src, writer,
                                     args.timeout, args.live_seconds, static_won,
-                                    dynamic_won=dynamic_won, aes_box=aes_box,
+                                    dynamic_won=dynamic_won, aes_box=aes_box, sign_box=sign_box,
                                 )
                                 if dyn_key:
                                     dynamic_won.set()
@@ -347,11 +354,12 @@ def main(argv=None) -> int:
 
             # A key from Frida stops the static search, so make sure it actually decrypts the assets
             encrypted = split_plain_scripts(entries)[0] if entries else {}
+            dyn_sign: bytes | None = sign_box.get("sign")
             if dyn_key and not static_key and encrypted:
-                sign = choose_signature(forced_sign, encrypted)
-                samples = _key_samples(encrypted)
-                if all(_key_decrypts(s, dyn_key, sign=sign) for s in samples):
-                    flog.log(SUCCESS, "Key verified against %d script(s).", len(samples))
+                ok, verified_sign, tested = verify_captured_key(dyn_key, encrypted, forced_sign, dyn_sign)
+                if ok:
+                    dyn_sign = verified_sign if verified_sign == dyn_sign else None
+                    flog.log(SUCCESS, "Key verified against %d script(s).", tested)
                 else:
                     flog.warning("Captured key %s doesn't decrypt the APK's scripts; ignoring it.",
                                 describe_key(dyn_key))
@@ -372,6 +380,7 @@ def main(argv=None) -> int:
                 args.output,
                 forced_sign=forced_sign,
                 preloaded_entries=entries,
+                exact_sign=dyn_sign if (final_key is not None and final_key is dyn_key) else None,
             )
             return _finish(args)
 

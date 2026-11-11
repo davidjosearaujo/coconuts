@@ -191,11 +191,13 @@ def run_frida_race(
     abort_event: threading.Event,
     dynamic_won: threading.Event | None = None,
     aes_box: dict | None = None,
+    sign_box: dict | None = None,
 ) -> bytes | None:
     """Runs Frida dynamic interception, aborting early if `abort_event` (static track) wins.
 
     Returns the captured XXTEA key (or None). A captured EncryptManager AES key/iv is stored in
-    `aes_box` (keys 'key', 'iv', 'flags') and also counts as winning the race.
+    `aes_box` (keys 'key', 'iv', 'flags') and also counts as winning the race. The signature the
+    engine passed with the key, when the hook saw one, is stored in `sign_box['sign']`.
     """
     key_box: dict[str, bytes] = {}
     key_event = threading.Event()
@@ -222,7 +224,10 @@ def run_frida_race(
             flog.log(SUCCESS, "Key captured: %s", describe_key(key))
             if p.get("sign"):
                 with contextlib.suppress(ValueError):
-                    flog.info("Signature passed with the key: %r", bytes.fromhex(p["sign"]))
+                    sig = bytes.fromhex(p["sign"])
+                    if sig and sign_box is not None:
+                        sign_box["sign"] = sig
+                    flog.info("Signature passed with the key: %r", sig)
             if dynamic_won is not None:
                 dynamic_won.set()
             key_event.set()

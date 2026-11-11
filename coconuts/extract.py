@@ -25,6 +25,7 @@ from .ciphers import (
 )
 from .log import SUCCESS, log
 from .statickeys import (
+    _key_decrypts,
     _key_samples,
     recover_key_and_sign_static,
     recover_key_static,
@@ -157,6 +158,23 @@ def choose_signature(forced: bytes | None, entries: dict[str, bytes],
     if exact is not None:
         return exact
     return detect_signature_prefix(list(entries.values()))
+
+
+def verify_captured_key(key: bytes, encrypted: dict[str, bytes], forced: bytes | None,
+                        exact: bytes | None) -> tuple[bool, bytes | None, int]:
+    """Checks a key captured at runtime against the encrypted scripts.
+
+    Tries the signature the engine passed with the key first, then the guessed prefix, so a bad
+    capture can't cost a key that would have worked. Returns (ok, signature that verified, number of
+    scripts tested).
+    """
+    samples = _key_samples(encrypted)
+    sign = choose_signature(forced, encrypted, exact=exact)
+    if not all(_key_decrypts(s, key, sign=sign) for s in samples) and exact is not None:
+        sign = choose_signature(forced, encrypted)
+    if all(_key_decrypts(s, key, sign=sign) for s in samples):
+        return True, sign, len(samples)
+    return False, None, len(samples)
 
 
 def collect_asset_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
@@ -301,7 +319,10 @@ def extract_offline(
     forced_sign: bytes | None = None,
     preloaded_entries: dict[str, bytes] | None = None,
     aes: tuple[bytes, bytes, int] | None = None,
+    exact_sign: bytes | None = None,
 ) -> int:
+    """`exact_sign` is a signature read from the engine (e.g. the one the Frida hook saw with the key).
+    It is used in preference to guessing one, but --sign still wins over it."""
     with contextlib.ExitStack() as stack:
         if aes is not None:
             return _extract_offline_aes(stack, apk_paths, aes, out_dir)
@@ -323,7 +344,6 @@ def extract_offline(
 
         # The engine passes its key and signature together to setXXTEAKeyAndSign, so when both can
         # be read from the library there is no need to guess the signature from a common prefix.
-        exact_sign: bytes | None = None
         if key is None and lib_path:
             exact = recover_key_and_sign_static(lib_path, entries)
             if exact is not None:

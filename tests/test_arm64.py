@@ -161,3 +161,58 @@ class TestStaleRegisters:
         pairs = find_key_and_sign(str(path))
         assert {(p.key, p.sign) for p in pairs} == {(KEY, SIGN), (SIGN, KEY)}
         assert all(decoy not in (p.key, p.sign) for p in pairs)
+
+
+class TestExactSignFromFrida:
+    """A signature the Frida hook saw with the key is used ahead of the guessed prefix."""
+
+    def _game(self, tmp_path: Path, sign: bytes) -> Path:
+        game = tmp_path / "game"
+        (game / "assets/src").mkdir(parents=True)
+        (game / "assets/src/main.luac").write_bytes(
+            sign + xxtea_encrypt(LUAJIT_CHUNK, normalize_key(KEY)))
+        return game
+
+    def test_exact_sign_is_used_without_a_library(self, tmp_path: Path) -> None:
+        """Key and signature both come from Frida; no engine library is needed at all."""
+        game = self._game(tmp_path, b"QQ")
+        out = tmp_path / "out"
+        written = extract_offline([str(game)], normalize_key(KEY), None, str(out), exact_sign=b"QQ")
+        assert written == 1
+        assert (out / "src/main.luac").read_bytes() == LUAJIT_CHUNK
+
+    def test_explicit_sign_still_wins_over_exact(self, tmp_path: Path) -> None:
+        game = self._game(tmp_path, b"QQ")
+        out = tmp_path / "out"
+        written = extract_offline([str(game)], normalize_key(KEY), None, str(out),
+                                  forced_sign=b"QQ", exact_sign=b"ZZ")
+        assert written == 1
+
+
+class TestVerifyCapturedKey:
+    KEY_BYTES = normalize_key(KEY)
+
+    def _encrypted(self, sign: bytes) -> dict[str, bytes]:
+        return {"src/main.luac": sign + xxtea_encrypt(LUAJIT_CHUNK, self.KEY_BYTES),
+                "src/app.luac": sign + xxtea_encrypt(LUA_SOURCE, self.KEY_BYTES)}
+
+    def test_exact_sign_that_decrypts_is_kept(self) -> None:
+        from coconuts.extract import verify_captured_key
+        ok, sign, n = verify_captured_key(self.KEY_BYTES, self._encrypted(b"QQ"), None, b"QQ")
+        assert (ok, sign, n) == (True, b"QQ", 2)
+
+    def test_wrong_exact_sign_falls_back_to_the_guessed_prefix(self) -> None:
+        """A captured signature that doesn't match must not cost a key that is actually right."""
+        from coconuts.extract import verify_captured_key
+        ok, sign, _ = verify_captured_key(self.KEY_BYTES, self._encrypted(b"QQ"), None, b"ZZ")
+        assert ok and sign == b"QQ"
+
+    def test_wrong_key_is_rejected(self) -> None:
+        from coconuts.extract import verify_captured_key
+        ok, sign, _ = verify_captured_key(normalize_key(b"nope"), self._encrypted(b"QQ"), None, None)
+        assert not ok and sign is None
+
+    def test_forced_sign_is_respected(self) -> None:
+        from coconuts.extract import verify_captured_key
+        ok, sign, _ = verify_captured_key(self.KEY_BYTES, self._encrypted(b"QQ"), b"QQ", b"ZZ")
+        assert ok and sign == b"QQ"

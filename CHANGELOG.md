@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-11-11
+
+### Fixed
+
+- The signature the Frida hook sees with the XXTEA key is now kept and used.
+  Before, it was logged but dropped, so a Frida-captured key was always paired
+  with a signature guessed from a shared prefix. The captured signature is now
+  tried first when the key is verified, falling back to the guess if it doesn't
+  decrypt, and it is also used for the offline extraction that follows. `--sign`
+  still wins over both.
+
 ## [2.0.0] - 2026-11-11
 
 Cocos2d-x **Lua** support: `.luac` / `.lua` scripts alongside `.jsc`, the XXTEA
@@ -101,8 +112,6 @@ decompilation of the bytecode that comes out.
   chunks. The Frida hooks in particular are unverified on a device.
 - Script bundles shipped as one encrypted zip (`LuaStack::loadChunksFromZIP`,
   usually `game.zip` or `src.zip`) aren't collected yet.
-- The signature captured by the Frida hook is logged but not yet used for
-  decryption; the one read statically is.
 
 ## [1.1.0] - 2026-10-28
 
@@ -158,7 +167,8 @@ Cocos Creator Android games and dumps their decrypted JavaScript.
   PCs, usage, output, troubleshooting and limitations; the MIT license and the
   coconut logo.
 
-[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.0...HEAD
+[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.1...HEAD
+[2.0.1]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.0...v2.0.1
 [2.0.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.1.0...v2.0.0
 [1.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.0.0...v1.1.0
 [1.0.0]: https://codeberg.org/davidjosearaujo/coconuts/releases/tag/v1.0.0
