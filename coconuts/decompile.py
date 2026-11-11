@@ -38,15 +38,26 @@ class Tool:
     home: Path | None = None  # where it may drop output files of its own
 
 
+# What a checkout of one of these looks like once it's built. unluac compiles to a jar;
+# luajit-decompiler-v2 is C++ and produces a binary whose name is up to whoever built it, so a
+# built binary sitting at the top of the checkout is accepted under either project's name.
+_ENTRY_POINTS = (
+    "unluac.jar", "bin/unluac.jar", "build/unluac.jar",
+    "luajit-decompiler-v2.exe", "luajit-decompiler-v2", "ljd.exe", "ljd",
+    "main.py",
+)
+
+
 def _as_tool(name: str, path: Path) -> Tool | None:
-    """Builds the command for a decompiler given the file it was pointed at."""
-    if path.is_dir():  # a checkout rather than a script
-        for candidate in ("main.py", "unluac.jar"):
+    """Builds the command for a decompiler given the file or checkout it was pointed at."""
+    if path.is_dir():
+        for candidate in _ENTRY_POINTS:
             if (path / candidate).is_file():
                 path = path / candidate
                 break
         else:
-            log.warning("%s: no main.py or unluac.jar in %s", name, path)
+            log.warning("%s: nothing runnable in %s (looked for %s). If it's built under another "
+                        "name, point at the file itself.", name, path, ", ".join(_ENTRY_POINTS[:4]))
             return None
     if not path.is_file():
         log.warning("%s: %s doesn't exist", name, path)
@@ -60,6 +71,14 @@ def _as_tool(name: str, path: Path) -> Tool | None:
         return Tool(name, (java, "-jar", str(path)), path.parent)
     if path.suffix == ".py":
         return Tool(name, (sys.executable, str(path)), path.parent)
+    if path.suffix == ".exe" and os.name != "nt":
+        # luajit-decompiler-v2 only builds on Windows, so on anything else its release binary has
+        # to go through Wine.
+        wine = shutil.which("wine")
+        if wine is None:
+            log.warning("%s: %s is a Windows executable and wine isn't on PATH", name, path)
+            return None
+        return Tool(name, (wine, str(path)), path.parent)
     return Tool(name, (str(path),), path.parent)
 
 
@@ -84,11 +103,29 @@ def resolve_tools(unluac: str | None = None, ljd: str | None = None) -> dict[str
 
 # How to install what's missing. Neither is pip-installable, so the message has to say where to look.
 _INSTALL_HINT = {
-    UNLUAC: "unluac is a Java jar: download it, then pass --unluac /path/to/unluac.jar "
-            "(or set $UNLUAC_JAR)",
-    LUAJIT_DECOMPILER: "luajit-decompiler-v2 is a GitHub project: clone it, then pass "
-                       "--ljd /path/to/luajit-decompiler-v2 (or set $LUAJIT_DECOMPILER)",
+    UNLUAC: "unluac is a Java program (github.com/HansWessels/unluac): build it with its build.sh, "
+            "then pass --unluac /path/to/unluac.jar (or set $UNLUAC_JAR)",
+    LUAJIT_DECOMPILER: "luajit-decompiler-v2 (github.com/marsinator358/luajit-decompiler-v2) is a "
+                       "Windows C++ program: use a release .exe (through Wine on Linux) and pass "
+                       "--ljd /path/to/luajit-decompiler-v2.exe (or set $LUAJIT_DECOMPILER)",
 }
+
+
+def _error_line(text: str, limit: int = 200) -> str:
+    """Pulls the useful line out of a decompiler's error output.
+
+    Java prints the exception message first and the stack frames under it; Python prints the
+    message last, below a 'Traceback' header. Frames are indented in both, so dropping indented
+    lines and the Python header leaves the message at the front either way.
+    """
+    useful = [line.rstrip() for line in text.splitlines()
+              if line.strip() and not line[0].isspace()
+              and not line.startswith("Traceback (most recent call last)")]
+    if not useful:
+        stripped = text.strip()
+        useful = [stripped.splitlines()[-1]] if stripped else [""]
+    message = useful[0].strip()
+    return message[:limit] + "..." if len(message) > limit else message
 
 
 def _produced_file(stem: str, *roots: Path | None) -> Path | None:
@@ -127,9 +164,8 @@ def _decompile_one(tool: Tool, src: Path, dst: Path) -> tuple[bool, str]:
                 return False, str(e)
 
             if proc.returncode != 0:
-                detail = (proc.stderr or proc.stdout or b"").decode("utf-8", "replace").strip()
-                last = detail.splitlines()[-1] if detail else f"exit code {proc.returncode}"
-                return False, last
+                detail = (proc.stderr or proc.stdout or b"").decode("utf-8", "replace")
+                return False, _error_line(detail) or f"exit code {proc.returncode}"
 
             if proc.stdout.strip():
                 dst.write_bytes(proc.stdout)

@@ -183,15 +183,21 @@ differences:
   endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android
   and emits separate 32-bit and 64-bit (GC64) bytecode, so one APK can ship two incompatible
   variants of the same script.
-- **Decompiling.** `--decompile` runs [unluac](https://sourceforge.net/projects/unluac/) (PUC Lua) or
+- **Decompiling.** `--decompile` runs [unluac](https://github.com/HansWessels/unluac) (PUC Lua) or
   [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2) (LuaJIT) over the
-  output, picking per chunk from its header, and writes `<name>.dec.lua` beside the bytecode.
-  Neither decompiler is on PyPI, so neither can be installed with coconuts: point at them with
-  `--unluac` / `--ljd`, or `$UNLUAC_JAR` / `$LUAJIT_DECOMPILER`. Missing ones are reported, and the
-  other flavour still runs. Two things to expect: stripped debug info is normal here, so control
-  flow recovers but local names don't; and a game shipping a patched LuaJIT opcode table yields
-  plausible-looking nonsense with a zero exit code, which nothing can detect for you. The `.luac` is
-  always kept.
+  output, picking per chunk from its header, and writes `<name>.dec.lua` beside the bytecode, which
+  is always kept. Neither decompiler is on PyPI, so neither is installed with coconuts:
+
+  - **unluac** is Java. Clone it and run its `build.sh` (needs a JDK), then pass
+    `--unluac path/to/unluac.jar` or the checkout itself. That build handles Lua 5.0-5.3 and
+    refuses 5.4 and 5.5, saying so.
+  - **luajit-decompiler-v2** is a Windows C++ program — it includes `windows.h` and does not
+    compile on Linux or macOS. Use a release `.exe` and run it through Wine (`--ljd` detects an
+    `.exe` and invokes `wine` for you), or run coconuts on Windows.
+
+  Expect two things. Stripped debug info is normal here: control flow comes back but local names
+  don't, so you get `A0_0` instead of `a`. And a game shipping a patched LuaJIT opcode table
+  produces plausible-looking nonsense with a zero exit code, which nothing can detect for you.
 
 Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
 hooks in particular are untested. Script bundles shipped as one encrypted zip (loaded with
@@ -464,8 +470,8 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--all-splits` | off | Also pull `split_config.*.apk`. Language, density and ABI splits are skipped by default because they never contain scripts. |
 | `--pretty` | off | After the dump, reformat every `.js` file in the output folder in place with [jsbeautifier](https://github.com/beautifier/js-beautify), so minified one-line bundles become readable. Prints one progress line per file. Large bundles are slow (a 4 MB one-liner takes about half a minute). |
 | `--decompile` | off | After the dump, decompile every compiled Lua chunk in the output to `<name>.dec.lua`, keeping the `.luac`. Each chunk is routed by its own header: PUC Lua to unluac, LuaJIT to luajit-decompiler-v2. Neither ships with coconuts (see below). With no `PACKAGE` and no `--apk`, decompiles an existing output folder instead of dumping, so a run can be retried after installing a decompiler. |
-| `--unluac PATH` | `$UNLUAC_JAR`, PATH | `unluac.jar`, or a wrapper script, for PUC Lua bytecode. A `.jar` needs a Java runtime. |
-| `--ljd PATH` | `$LUAJIT_DECOMPILER`, PATH | A luajit-decompiler-v2 checkout or its `main.py`, for LuaJIT bytecode. |
+| `--unluac PATH` | `$UNLUAC_JAR`, PATH | `unluac.jar`, a built checkout, or a wrapper script, for PUC Lua bytecode. A `.jar` needs a Java runtime. |
+| `--ljd PATH` | `$LUAJIT_DECOMPILER`, PATH | luajit-decompiler-v2 for LuaJIT bytecode: the `.exe`, a built binary, or a directory holding one. A `.exe` is run through `wine` when not on Windows. |
 | `-v`, `--verbose` | off | Debug output: per-file decryption failures, radare2 and Frida details, tracebacks. |
 | `--no-color` | off | Disable ANSI colours. You can also set `NO_COLOR` or `TERM=dumb`. Colours are off automatically when stderr isn't a terminal. |
 
@@ -616,9 +622,12 @@ tests/
 ├── conftest.py            # synthetic assets: encrypted/plain Lua, an APK-shaped zip
 ├── test_ciphers.py        # XXTEA round-trip, signature detection, bytecode identification
 ├── test_extract.py        # output paths, path-traversal refusal, end-to-end decryption
+├── test_decompile.py      # --decompile, driven with stand-in decompilers
+├── test_real_bytecode.py  # the header parser against real bytecode from every Lua runtime
 ├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
 ├── frida_agent_test.js    # the agent's behaviour tests
-└── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
+├── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
+└── fixtures/bytecode/     # compiled chunks from PUC Lua 5.1-5.5 and LuaJIT 2.0/2.1
 ```
 
 ```sh
@@ -634,9 +643,16 @@ The suite is offline and needs no device: the ciphers and the extraction paths r
 assets encrypted the way the engine does it, and the Frida agent is rendered through
 `build_frida_script()` and driven against a stubbed Frida runtime — a flat memory space where reads
 outside the mapping fault, so hooks are exercised with the hostile arguments a real process hands
-them. The agent tests skip if Node isn't installed. What this cannot cover is the part that matters
-most on a real target: whether the symbols and struct layouts the hooks assume are the ones the
-game's engine actually has.
+them. The agent tests skip if Node isn't installed.
+
+Bytecode identification is checked against `tests/fixtures/bytecode/`, real compiled chunks from
+every PUC Lua and LuaJIT runtime rather than headers written by hand; `tests/fixtures/gen_bytecode.py`
+regenerates them from lupa's bundled interpreters. Setting `$UNLUAC_JAR` or `$LUAJIT_DECOMPILER`
+additionally runs `--decompile` against the real decompilers; without them those tests skip and
+stand-ins cover the plumbing.
+
+What none of this covers is the part that matters most on a real target: whether the symbols and
+struct layouts the Frida hooks assume are the ones the game's engine actually has.
 
 Two conventions to keep when contributing:
 - `frida`, `r2pipe` and `Crypto` are imported lazily, so unrelated paths work without them.

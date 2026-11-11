@@ -42,10 +42,13 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   never `luaL_loadbufferx`. Not urgent — the agent resolves the Lua loader itself from the export and
   symbol tables — but a stripped lib needs the offset precomputed, like the JS path already does.
 - [x] **Bytecode decompilation (optional).** `--decompile` routes each chunk to unluac or
-  luajit-decompiler-v2 by its header and writes `<name>.dec.lua` beside the bytecode. Still open:
-  the luajit-decompiler-v2 command line was written against its documented behaviour, not run
-  against the real tool -- the pass accepts either stdout or a `<stem>.lua` it writes itself, so
-  check which it does and whether a flag is needed for the output location.
+  luajit-decompiler-v2 by its header and writes `<name>.dec.lua` beside the bytecode. Verified
+  end to end against a real unluac build over real bytecode from every PUC and LuaJIT runtime.
+- [ ] **luajit-decompiler-v2 has never been run.** It's a Windows C++ program (`windows.h`,
+  backslash includes, requires unsigned `char`) and doesn't compile on Linux, so the LuaJIT half of
+  `--decompile` is still untested. Its README says output goes to `output/<name>.lua` beside the
+  exe, which is what the pass expects, and `--ljd` runs an `.exe` through Wine. Confirm on Windows
+  or under Wine, and check whether `-?` offers an output-path flag worth passing.
 - [ ] **XOR known-plaintext attack for Lua.** It only knows JS headers. Add Lua plaintexts if a Lua
   engine with XOR encryption turns up.
 

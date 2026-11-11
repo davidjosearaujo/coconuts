@@ -86,6 +86,64 @@ class TestToolResolution:
         tool = dec._as_tool("fake", home)
         assert tool is not None and tool.argv[1].endswith("main.py")
 
+    @pytest.mark.parametrize("entry", ["bin/unluac.jar", "luajit-decompiler-v2", "ljd"])
+    def test_directory_resolves_a_built_entry_point(self, tmp_path: Path, entry: str,
+                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+        """unluac builds to bin/unluac.jar; luajit-decompiler-v2 is C++ and builds to a binary."""
+        monkeypatch.setattr(dec.shutil, "which", lambda _: "/usr/bin/java")
+        home = tmp_path / "checkout"
+        (home / Path(entry).parent).mkdir(parents=True, exist_ok=True)
+        (home / entry).write_text("", encoding="utf-8")
+        tool = dec._as_tool("fake", home)
+        assert tool is not None and tool.argv[-1].endswith(Path(entry).name)
+
+    def test_windows_exe_goes_through_wine(self, tmp_path: Path,
+                                           monkeypatch: pytest.MonkeyPatch) -> None:
+        exe = tmp_path / "luajit-decompiler-v2.exe"
+        exe.write_bytes(b"MZ")
+        monkeypatch.setattr(dec.os, "name", "posix")
+        monkeypatch.setattr(dec.shutil, "which", lambda n: "/usr/bin/wine" if n == "wine" else None)
+        tool = dec._as_tool("ljd", exe)
+        assert tool is not None and tool.argv == ("/usr/bin/wine", str(exe))
+
+    def test_windows_exe_without_wine(self, tmp_path: Path,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        exe = tmp_path / "luajit-decompiler-v2.exe"
+        exe.write_bytes(b"MZ")
+        monkeypatch.setattr(dec.os, "name", "posix")
+        monkeypatch.setattr(dec.shutil, "which", lambda _: None)
+        assert dec._as_tool("ljd", exe) is None
+
+
+class TestErrorLine:
+    def test_java_stack_trace_keeps_the_message(self) -> None:
+        trace = ('Exception in thread "main" java.lang.IllegalStateException: '
+                 "The input chunk's Lua version is 5.4; unluac can only handle Lua 5.0 - Lua 5.3.\n"
+                 "\tat unluac.parse.BHeader.<init>(BHeader.java:63)\n"
+                 "\tat unluac.Main.main(Main.java:42)\n")
+        assert "unluac can only handle" in dec._error_line(trace)
+        assert "at unluac.Main" not in dec._error_line(trace)
+
+    def test_python_traceback_keeps_the_message(self) -> None:
+        trace = ("Traceback (most recent call last):\n"
+                 '  File "main.py", line 3, in <module>\n'
+                 "    raise ValueError('bad prototype')\n"
+                 "ValueError: bad prototype\n")
+        assert dec._error_line(trace) == "ValueError: bad prototype"
+
+    def test_plain_message(self) -> None:
+        assert dec._error_line("could not open input\n") == "could not open input"
+
+    def test_only_indented_output(self) -> None:
+        assert dec._error_line("    indented only\n") == "indented only"
+
+    def test_empty(self) -> None:
+        assert dec._error_line("") == ""
+
+    def test_long_message_is_truncated(self) -> None:
+        assert dec._error_line("x" * 500).endswith("...")
+        assert len(dec._error_line("x" * 500)) <= 203
+
     def test_directory_without_an_entry_point(self, tmp_path: Path) -> None:
         empty = tmp_path / "nothing"
         empty.mkdir()
@@ -180,7 +238,7 @@ class TestDecompileDir:
         with caplog.at_level("INFO"):
             dec.decompile_dir(str(dumped), unluac=to_stdout)
         assert "2 chunk(s) need luajit-decompiler-v2" in caplog.text
-        assert "clone it" in caplog.text                       # says how to get it
+        assert "--ljd" in caplog.text                          # says how to point at it
         assert (dumped / "src/legacy.dec.lua").exists()        # the PUC chunk still ran
         assert not (dumped / "src/main.dec.lua").exists()
 

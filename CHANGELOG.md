@@ -28,7 +28,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aren't bundled: point at them with `--unluac` / `--ljd` or `$UNLUAC_JAR` /
   `$LUAJIT_DECOMPILER`. A missing one is reported and the other still runs.
   With no `PACKAGE` and no `--apk`, `--decompile` works over an existing
-  output folder instead of dumping.
+  output folder instead of dumping. unluac is verified end to end; the LuaJIT
+  side is not, as luajit-decompiler-v2 is a Windows C++ program that doesn't
+  build on Linux (`--ljd` runs an `.exe` through Wine).
+- Compiled Lua 5.5 chunks are identified (lupa ships a 5.5 runtime, so real
+  5.5 bytecode exists in the wild to test against).
 - A pytest suite in `tests/`: ciphers, compiled-Lua identification and the
   offline extraction paths run against synthetic assets, and the Frida agent
   is rendered through `build_frida_script()` and driven against a stubbed

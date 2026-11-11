@@ -24,7 +24,7 @@ LUA_MAGICS = (PUC_LUA_MAGIC, LUAJIT_MAGIC)
 UNLUAC = "unluac"                           # PUC Lua 5.0-5.4
 LUAJIT_DECOMPILER = "luajit-decompiler-v2"  # LuaJIT 2.0 / 2.1
 
-_PUC_VERSIONS = {0x51: "5.1", 0x52: "5.2", 0x53: "5.3", 0x54: "5.4"}
+_PUC_VERSIONS = {0x51: "5.1", 0x52: "5.2", 0x53: "5.3", 0x54: "5.4", 0x55: "5.5"}
 _LUAJIT_VERSIONS = {1: "2.0", 2: "2.1"}
 
 # luajit/src/lj_bcdump.h
@@ -90,7 +90,8 @@ def _describe_puc_lua(data: bytes) -> LuaBytecode:
     name = (f"PUC Lua {_PUC_VERSIONS[version_byte]} bytecode" if version_byte in _PUC_VERSIONS
             else f"PUC Lua bytecode (version byte {version_byte:#04x})")
     notes = []
-    size_t_at = {0x51: 8, 0x52: 8, 0x53: 13}.get(version_byte)  # 5.4 has no size_t in the header
+    # 5.4 and 5.5 dropped size_t from the header, so there's no bitness to report for them.
+    size_t_at = {0x51: 8, 0x52: 8, 0x53: 13}.get(version_byte)
     if version_byte in (0x51, 0x52) and len(data) > 6 and data[6] == 0:
         notes.append("big-endian")
     if size_t_at is not None and len(data) > size_t_at and data[size_t_at] in (4, 8):
