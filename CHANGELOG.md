@@ -7,82 +7,102 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-11-11
+
+Cocos2d-x **Lua** support: `.luac` / `.lua` scripts alongside `.jsc`, the XXTEA
+key and its signature read straight out of the engine library, and optional
+decompilation of the bytecode that comes out.
+
+### Breaking
+
+- Scripts that no key decrypts are saved to `raw_scripts/` instead of
+  `raw_jsc/`, and the messages around them say "script(s)" rather than ".jsc".
+  Anything scripted against the old path needs updating.
+
 ### Added
-- Cocos2d-x Lua games: `.luac` (and `.lua`) scripts are decrypted with the
-  same Cocos XXTEA as `.jsc`. Lua source is written as `.lua`; compiled Lua /
-  LuaJIT bytecode stays `.luac`. Scripts shipped unencrypted are copied as-is
-  without needing a key. Not yet tested against a real Lua game.
-- `libcocos2dlua.so` is recognised as an engine library (default name when
-  reading it from the APK, and `Cocos2dxLuaJavaBridge` as its JNI marker).
-- Static key search: `main.lua` is an extra Tier 1 anchor.
-- Frida: hooks `LuaStack::setXXTEAKeyAndSign` for the key (and logs the
-  signature), and `luaL_loadbufferx` / `luaL_loadbuffer` for live Lua dumps.
-- Compiled Lua chunks are identified from their header — PUC Lua 5.1–5.4 vs
-  LuaJIT 2.0/2.1, with bitness, endianness and whether debug info was stripped
-  — and a run reports the flavours it wrote along with the decompiler that
-  opens them (`unluac` or `luajit-decompiler-v2`).
-- `--decompile`: after the dump, run a Lua decompiler over every compiled
-  chunk in the output and write `<name>.dec.lua` beside it, keeping the
-  `.luac`. Each chunk is routed by its own header, so a game mixing PUC Lua
-  and LuaJIT chunks works. unluac and luajit-decompiler-v2 aren't on PyPI and
-  aren't bundled: point at them with `--unluac` / `--ljd` or `$UNLUAC_JAR` /
-  `$LUAJIT_DECOMPILER`. A missing one is reported and the other still runs.
-  With no `PACKAGE` and no `--apk`, `--decompile` works over an existing
-  output folder instead of dumping. The LuaJIT slot is not tied to one
-  program: any decompiler works that takes the input path last and either
-  prints to stdout or leaves `<stem>.lua` behind. Both halves are verified end
-  to end against real bytecode, with unluac and with ljd.
-- Compiled Lua 5.5 chunks are identified (lupa ships a 5.5 runtime, so real
-  5.5 bytecode exists in the wild to test against).
-- The XXTEA key and its signature are read directly from the engine library's
-  `LuaStack::setXXTEAKeyAndSign` call site, by decoding the arm64 instructions
-  that set up its arguments -- what you would otherwise do by hand in Ghidra.
-  This is what the string tiers could never do: they collect every literal in
-  `applicationDidFinishLaunching` and trial-decrypt them, so they can find the
-  key but never learn which literal was the signature. Needs no radare2, and
-  matches on the argument shape rather than the vtable offset, which varies by
-  Cocos version. The pair is still verified by trial decryption, so a wrong
-  match just falls back to the string tiers.
-- A pytest suite in `tests/`: ciphers, compiled-Lua identification and the
-  offline extraction paths run against synthetic assets, and the Frida agent
-  is rendered through `build_frida_script()` and driven against a stubbed
-  Frida runtime under Node (skipped when Node isn't installed). Install it
-  with `pip install -e '.[dev]'`.
+
+- **Lua games.** `.luac` and `.lua` scripts are decrypted with the same Cocos
+  XXTEA as `.jsc`. Decrypted Lua source is written as `.lua`, compiled chunks
+  stay `.luac`, and scripts shipped unencrypted are copied as-is without
+  needing a key. `libcocos2dlua.so` is recognised as an engine library, with
+  `Cocos2dxLuaJavaBridge` as its JNI marker, and `main.lua` is an extra anchor
+  for the static key search.
+- **Key and signature read from the call site.** Lua games pass both to
+  `LuaStack::setXXTEAKeyAndSign` from `applicationDidFinishLaunching`, and that
+  call compiles to a recognisable arm64 shape, so both are decoded from the
+  instructions -- what you would otherwise do by hand in Ghidra. The string
+  tiers could only ever find the key: they collect every literal in that
+  function and trial-decrypt them, so the signature still had to be guessed
+  from a prefix shared by the encrypted files. Needs no radare2, and matches on
+  the argument shape rather than the vtable offset, which varies by Cocos
+  version. The pair is verified by trial decryption, so a wrong match simply
+  falls back to the string tiers.
+- **Compiled chunks are identified** from their header: PUC Lua 5.1-5.5 or
+  LuaJIT 2.0/2.1, with bitness, endianness and whether debug info was stripped.
+  A run reports what it wrote and which decompiler opens it.
+- **`--decompile`** runs a decompiler over the output and writes
+  `<name>.dec.lua` beside each chunk, keeping the `.luac`. Each chunk is routed
+  by its own header, so a game mixing both formats works. The decompilers are
+  GitHub projects rather than PyPI packages and none is bundled: point at them
+  with `--unluac` / `--ljd` or `$UNLUAC_JAR` / `$LUAJIT_DECOMPILER`. A missing
+  one is reported and the other still runs. The LuaJIT slot is not tied to one
+  program -- any decompiler works that takes the input path last and either
+  prints to stdout or leaves `<stem>.lua` behind. With no `PACKAGE` and no
+  `--apk`, `--decompile` works over an existing output folder instead of
+  dumping, so a run can be retried after installing a decompiler.
+- **Frida** hooks `LuaStack::setXXTEAKeyAndSign` for the key, logging the
+  signature passed with it, and `luaL_loadbufferx` / `luaL_loadbuffer` for live
+  dumps of every chunk the game loads.
+- **A test suite** in `tests/` (`pip install -e '.[dev]'`): ciphers, chunk
+  identification and the offline paths over synthetic assets; the header parser
+  against real bytecode from every PUC Lua and LuaJIT runtime; the Frida agent
+  rendered through `build_frida_script()` and driven against a stubbed Frida
+  runtime under Node. The radare2 and real-decompiler tests run when those
+  tools are present and skip when they aren't.
+
+### Changed
+
+- **Frida agent.** Each symbol table is read once per library instead of up to
+  nine times, all of it inside the linker's `dlopen` on the game's main thread.
+  The `evalString` and `luaL_loadbuffer` hooks are resolved independently, so a
+  Lua library whose `evalString` offset was pre-resolved by radare2 no longer
+  loses its Lua dump hook. Repeated loads of the same chunk are dropped in the
+  agent rather than re-sent over USB, while a changed body at the same path
+  still gets through.
+- **The agent no longer throws**, out of a hook or out of installation. A
+  stripped linker falls back to `android_dlopen_ext` / `dlopen` and then to
+  polling instead of aborting the agent -- which previously also skipped the
+  scan for an already-loaded library, leaving a run with no hooks at all. A
+  library whose JNI bridge symbol is missing is matched by name when hooks
+  actually attach.
+- "Saved N live script dump(s)" counts distinct files rather than writes.
+- A failed write is reported instead of aborting the run.
+- The engine library is scanned once per run rather than once per caller,
+  script collection and signature precedence each live in one place instead of
+  three, and the output directory is resolved once rather than once per file.
 
 ### Fixed
-- Tier 0 missed every string an arm64 build references, which is nearly all of
-  them. A string address is formed as `adrp` (4 KB page) + `add` (offset), and
-  only the `adrp` carries radare2's `ptr` field, so following it read whatever
+
+- **Tier 0 missed every string an arm64 build references**, which is nearly all
+  of them. A string address is formed as `adrp` (4 KB page) + `add` (offset),
+  and only the `adrp` carries radare2's `ptr`, so following it read whatever
   sat at the page boundary -- for the first page, the ELF header, which then
-  entered the candidate list as a key. radare2 does resolve the pair, but only
-  after a full `aaa`, far too slow for this pass, so the two halves are now
-  joined from what the cheap single-function analysis already reports.
+  entered the candidate list as a key. radare2 resolves the pair only after a
+  full `aaa`, far too slow for this pass, so the halves are joined from what
+  the cheap single-function analysis already reports.
 - Binary data could be collected as a candidate key: `psz` escapes
   non-printable bytes, and the resulting `\x7fELF...` text passes
   `str.isprintable()`.
 
-### Changed
-- When no key works, the untouched scripts go to `raw_scripts/` instead of
-  `raw_jsc/`, and log messages say "script(s)" instead of ".jsc".
-- Frida agent: each symbol table is read once per library instead of up to
-  nine times, all of it inside the linker's `dlopen` on the game's main
-  thread. The `evalString` and `luaL_loadbuffer` hooks are now resolved
-  independently, so a Lua library whose `evalString` offset was pre-resolved
-  by radare2 no longer loses its Lua dump hook. Repeated loads of the same
-  chunk are dropped in the agent rather than re-sent over USB, and a changed
-  body at the same path still gets through.
-- Frida agent: nothing throws out of a hook or out of installation any more.
-  A stripped linker falls back to `android_dlopen_ext` / `dlopen` and then to
-  polling, instead of aborting the agent (which previously also skipped the
-  already-loaded-library scan); a library whose JNI bridge symbol is missing
-  is still matched by name when hooks actually attach.
-- "Saved N live script dump(s)" counts distinct files, not writes.
-- The three offline write loops share one `write_output` helper, which also
-  reports a failed write instead of letting it abort the run.
-- The engine library is scanned for the key/signature call once per run rather
-  than once per caller, script collection and signature precedence each live in
-  one place instead of three, and the output directory is resolved once rather
-  than once per written file.
+### Known limitations
+
+- None of the Lua support has run against a real game yet; it is tested
+  against synthetic assets, assembled arm64 libraries and real compiled Lua
+  chunks. The Frida hooks in particular are unverified on a device.
+- Script bundles shipped as one encrypted zip (`LuaStack::loadChunksFromZIP`,
+  usually `game.zip` or `src.zip`) aren't collected yet.
+- The signature captured by the Frida hook is logged but not yet used for
+  decryption; the one read statically is.
 
 ## [1.1.0] - 2026-10-28
 
@@ -138,6 +158,7 @@ Cocos Creator Android games and dumps their decrypted JavaScript.
   PCs, usage, output, troubleshooting and limitations; the MIT license and the
   coconut logo.
 
-[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.1.0...HEAD
+[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.0...HEAD
+[2.0.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.1.0...v2.0.0
 [1.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.0.0...v1.1.0
 [1.0.0]: https://codeberg.org/davidjosearaujo/coconuts/releases/tag/v1.0.0
