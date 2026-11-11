@@ -24,6 +24,36 @@ extern "C" {
 
 namespace cocos2d {
 
+Ref::~Ref() {}
+
+// Stubs: present so the vtable has the entries a real LuaStack has, in the same order.
+void LuaStack::addSearchPath(const char *) {}
+void LuaStack::addLuaLoader(int (*)(lua_State *)) {}
+int  LuaStack::reload(const char *) { return 0; }
+void LuaStack::removeScriptObjectByObject(Ref *) {}
+void LuaStack::removeScriptHandler(int) {}
+int  LuaStack::reallocateScriptHandler(int) { return 0; }
+int  LuaStack::executeScriptFile(const char *) { return 0; }
+int  LuaStack::executeGlobalFunction(const char *) { return 0; }
+void LuaStack::clean() {}
+void LuaStack::pushInt(int) {}
+void LuaStack::pushFloat(float) {}
+void LuaStack::pushLong(long) {}
+void LuaStack::pushBoolean(bool) {}
+void LuaStack::pushString(const char *) {}
+void LuaStack::pushString(const char *, int) {}
+void LuaStack::pushNil() {}
+void LuaStack::pushObject(Ref *, const char *) {}
+void LuaStack::pushLuaValue(const LuaValue &) {}
+void LuaStack::pushLuaValueDict(const LuaValueDict &) {}
+void LuaStack::pushLuaValueArray(const LuaValueArray &) {}
+bool LuaStack::pushFunctionByHandler(int) { return false; }
+int  LuaStack::executeFunction(int) { return 0; }
+int  LuaStack::executeFunctionByHandler(int, int) { return 0; }
+int  LuaStack::executeFunctionReturnArray(int, int, int, __Array &) { return 0; }
+int  LuaStack::executeFunction(int, int, int, const std::function<void(lua_State *, int)> &) { return 0; }
+bool LuaStack::handleAssert(const char *) { return false; }
+
 LuaStack::LuaStack()
     : _state(nullptr), _xxteaEnabled(false), _xxteaKey(nullptr), _xxteaKeyLen(0),
       _xxteaSign(nullptr), _xxteaSignLen(0)

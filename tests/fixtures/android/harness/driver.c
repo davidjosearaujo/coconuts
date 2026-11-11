@@ -26,13 +26,17 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    int (*run)(void) = (int (*)(void))dlsym(h, "cocos_run_scripts");
+    int (*run)(void *) = (int (*)(void *))dlsym(h, "cocos_run_scripts");
     if (!run) {
         fprintf(stderr, "[driver] dlsym failed: %s\n", dlerror());
         return 3;
     }
 
-    int rc = run();
+    /* The engine uses this to find which vtable slot the key setter occupies. It resolves only
+       in the default-visibility builds, which is the point: a hidden one has nothing to look up. */
+    void *setter = dlsym(h, "_ZN7cocos2d8LuaStack18setXXTEAKeyAndSignEPKciS2_i");
+
+    int rc = run(setter);
     printf("[driver] cocos_run_scripts -> %d\n", rc);
     fflush(stdout);
 

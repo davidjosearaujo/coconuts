@@ -29,7 +29,10 @@ SERIAL = os.environ.get("COCONUTS_SERIAL", "")        # adb serial; "" = the onl
 FRIDA_HOST = os.environ.get("COCONUTS_FRIDA_HOST", "127.0.0.1:27500")
 REMOTE = os.environ.get("COCONUTS_REMOTE", "/data/local/tmp/coconuts_harness")
 BRIDGE = "Java_org_cocos2dx_lib_Cocos2dxLuaJavaBridge_retainLuaFunction"
-ATTACH_DELAY = 6
+ATTACH_DELAY = 10   # the driver waits this long before dlopen, to be attached to in time
+# HARNESS_* variables are passed through to the engine (HARNESS_ZERO_LEN_KEY makes it set the key
+# with zero lengths, the way a fork relying on NUL-terminated strings would).
+ENGINE_ENV = {k: v for k, v in os.environ.items() if k.startswith("HARNESS_")}
 
 
 ADB = ["adb"] + (["-s", SERIAL] if SERIAL else [])
@@ -43,13 +46,22 @@ def run_variant(runtime: str, variant: str) -> dict:
     remote_dir = f"{REMOTE}/{runtime}/{variant}"
     script_src = build_frida_script(BRIDGE, dump_off=None, key_off=None, key_is_std_string=False)
 
+    # Wait for any earlier driver to actually be gone before starting one. Attaching to a stale
+    # process means the agent arrives after the key was already set, and sees only the later
+    # xxtea_decrypt call -- a key with no signature, for no reason to do with the agent.
     adb("shell", "pkill -9 -f tmp/coconuts_harness")
-    time.sleep(0.5)
+    for _ in range(50):
+        if not adb("shell", "pidof driver").split():
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("a previous driver process is still running")
 
     # The driver waits before dlopen()ing the engine lib, so the agent is live when the library
     # is mapped: the do_dlopen hook is what has to catch it, exactly as in a real game.
     proc = subprocess.Popen(
-        [*ADB, "shell", f"{REMOTE}/driver {remote_dir}/libcocos2dlua.so {ATTACH_DELAY}"],
+        [*ADB, "shell", "".join(f"{k}={v} " for k, v in ENGINE_ENV.items())
+         + f"{REMOTE}/driver {remote_dir}/libcocos2dlua.so {ATTACH_DELAY}"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
 
     pid = None
@@ -57,6 +69,8 @@ def run_variant(runtime: str, variant: str) -> dict:
         time.sleep(0.1)
         got = adb("shell", "pidof driver").split()
         if got:
+            if len(got) > 1:
+                raise RuntimeError(f"several driver processes are running: {got}")
             pid = int(got[0])
             break
     if pid is None:
@@ -118,10 +132,28 @@ def report(r: dict) -> None:
     for f in sorted(r["files"], key=lambda x: x["path"]):
         print(f"  {f['path']!r:52} len={f['len']:4d} lang={f['lang'] or '-':4} "
               f"sha={f['sha']} head={f['head']!r}")
+    for line in r["stdout"].splitlines():
+        if "vtable slot" in line or "zero lengths" in line or "not exported" in line:
+            print(f"--- engine: {line.strip()}")
     engine = [ln for ln in r["stdout"].splitlines() if "loaded" in ln or "FAILED" in ln
               or "done:" in ln]
     print(f"--- engine loaded {len(engine)} line(s); "
           f"{'ok' if any('done:' in ln and '0 failed' in ln for ln in engine) else 'CHECK'} ---")
+    if attached_late(r):
+        print("--- the agent attached after the engine had already loaded its chunks; "
+              "nothing to conclude from this run, so re-run it ---")
+
+
+def attached_late(r: dict) -> bool:
+    """True when the engine loaded chunks but the agent saw none of them.
+
+    The agent is attached to a process that then dlopen()s the library, so a slow attach can
+    arrive after the chunks are already loaded. That looks exactly like a broken hook and is not
+    one, so it is called out rather than reported as a result.
+    """
+    loaded = any("done:" in ln and " 0 loaded" not in ln for ln in r["stdout"].splitlines())
+    hooked = any("hooked luaL_loadbuffer" in m for _l, m in r["logs"])
+    return loaded and hooked and not r["files"]
 
 
 def main() -> int:
@@ -139,6 +171,8 @@ def main() -> int:
         warned = [m for _l, m in r["logs"] if "live script dumps disabled" in m]
         state = hooked[0].split(" @ ")[0].replace("hooked ", "") if hooked else (
             "NOT FOUND (warned)" if warned else "no hook, no warning")
+        if attached_late(r):
+            state += "  [attached late: re-run]"
         print(f"  {r['variant']:22} {len(r['files']):>6} {len(r['keys']):>5}  {state}")
     return 0
 

@@ -254,6 +254,99 @@ function readCharsAndLen(p, lenArg) {
 }
 
 // ---------------------------------------------------------------------------
+// LuaJIT bytecode length
+// ---------------------------------------------------------------------------
+
+var LJ_BCDUMP_F_STRIP = 0x02;
+var LJ_BCDUMP_F_KNOWN = 0x1f;   // BCDUMP_F_BITOP * 2 - 1, the flags lj_bcread.c accepts
+
+/** Largest readable prefix of `want` bytes at `ptr`, halved until a read succeeds. */
+function readUpTo(ptr, want) {
+    while (want > 0) {
+        try {
+            var buf = ptr.readByteArray(want);
+            if (buf !== null) return new Uint8Array(buf);
+        } catch (e) {}
+        want = want >>> 1;   // the mapping ends inside the window
+    }
+    return null;
+}
+
+/** Reads a ULEB128 at `pos`; null when the buffer ends mid-number. */
+function readUleb(b, pos) {
+    var value = 0, shift = 0, byte;
+    do {
+        if (pos >= b.length || shift > 56) return null;
+        byte = b[pos++];
+        value += (byte & 0x7f) * Math.pow(2, shift);   // not <<: a length can exceed 2^31
+        shift += 7;
+    } while (byte & 0x80);
+    return {value: value, pos: pos};
+}
+
+/**
+ * Walks a LuaJIT bytecode dump in `b`: returns its total length, 0 when it isn't one, or -1 when
+ * the buffer ends first and more of it is needed.
+ *
+ * Format, from lj_bcread.c (bcread_header and the prototype loop in lj_bcread): the 0x1b 'L' 'J'
+ * magic and a version byte, a ULEB128 flags word, then the chunk name as a ULEB128 length plus
+ * that many bytes unless BCDUMP_F_STRIP is set, then ULEB128-length-prefixed prototypes, ending
+ * at a zero length byte.
+ */
+function parseLuajitDump(b) {
+    if (b.length < 5) return -1;
+    if (b[0] !== 0x1b || b[1] !== 0x4c || b[2] !== 0x4a) return 0;
+    var flags = readUleb(b, 4);   // 3 magic bytes + the version byte
+    if (flags === null) return -1;
+    if ((flags.value & ~LJ_BCDUMP_F_KNOWN) !== 0) return 0;
+
+    var pos = flags.pos;
+    if (!(flags.value & LJ_BCDUMP_F_STRIP)) {
+        var name = readUleb(b, pos);
+        if (name === null) return -1;
+        pos = name.pos + name.value;
+    }
+    for (;;) {
+        if (pos >= b.length) return -1;
+        if (b[pos] === 0) return pos + 1;        // the dump's own end marker
+        var proto = readUleb(b, pos);
+        if (proto === null) return -1;
+        pos = proto.pos + proto.value;
+        if (pos > MAX_CHUNK_LEN) return 0;
+    }
+}
+
+/**
+ * Length of the LuaJIT bytecode dump at `ptr`, or 0 if that isn't what is there.
+ *
+ * LuaJIT's own lib_package.c loads embedded bytecode as
+ *     luaL_loadbuffer(L, bcdata, ~(size_t)0, name)
+ * because a dump carries its own end, so the length is genuinely unknown to the caller and has to
+ * be recovered by walking it. The window grows rather than starting large: nothing is known about
+ * the mapping behind the pointer yet.
+ */
+function luajitDumpLength(ptr) {
+    var want = 4096;
+    while (want <= MAX_CHUNK_LEN) {
+        var buf = readUpTo(ptr, want);
+        if (buf === null) return 0;
+        var len = parseLuajitDump(buf);
+        if (len >= 0) return len;
+        if (buf.length < want) return 0;   // the mapping ended, so there is no more to read
+        want *= 4;
+    }
+    return 0;
+}
+
+/**
+ * The chunk length a loader hook should use. Anything past MAX_CHUNK_LEN is not a length the
+ * engine means: either the LuaJIT bytecode convention above, or a garbage argument.
+ */
+function chunkLength(szArg, buff) {
+    return szArg.compare(MAX_CHUNK_LEN) <= 0 ? szArg.toUInt32() : luajitDumpLength(buff);
+}
+
+// ---------------------------------------------------------------------------
 // Script dumping
 // ---------------------------------------------------------------------------
 
@@ -330,7 +423,7 @@ function hookLuaLoadBuffer(addr) {
                 if (buff.isNull() || name.isNull()) return;
                 var path = readName(name, MAX_NAME_LEN);
                 if (!path || !LUA_CHUNK_NAME.test(path)) return;
-                emitBytes(path, 'lua', buff, args[2].toUInt32());
+                emitBytes(path, 'lua', buff, chunkLength(args[2], buff));
             } catch (e) {
                 logMsg('debug', 'lua dump hook: ' + e);
             }

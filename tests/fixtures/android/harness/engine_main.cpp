@@ -4,6 +4,7 @@
  * load each script through LuaStack::luaLoadBuffer.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern "C" {
@@ -41,8 +42,31 @@ int Java_org_cocos2dx_lib_Cocos2dxLuaJavaBridge_retainLuaFunction(void *env, voi
     return handler;
 }
 
+/**
+ * Reports which vtable slot setXXTEAKeyAndSign landed in, so the index a vtable-walking hook
+ * would need is confirmed by a real compiler rather than assumed. `setter` is the address the
+ * driver resolved for the mangled symbol; without it (a hidden-visibility build) there is
+ * nothing to compare the vtable entries against.
+ */
+static void report_vtable_slot(cocos2d::LuaStack *stack, void *setter)
+{
+    if (!setter) {
+        printf("[engine] the setter is not exported here; cannot locate its vtable slot\n");
+        return;
+    }
+    void **vt = *(void ***)stack;
+    for (int i = 0; i < 64; i++) {
+        if (vt[i] == setter) {
+            printf("[engine] setXXTEAKeyAndSign is vtable slot %d (+%#x with %zu-bit pointers)\n",
+                   i, (unsigned)(i * sizeof(void *)), sizeof(void *) * 8);
+            return;
+        }
+    }
+    printf("[engine] setXXTEAKeyAndSign is not in the first 64 vtable slots\n");
+}
+
 extern "C" __attribute__((visibility("default")))
-int cocos_run_scripts(void)
+int cocos_run_scripts(void *setter)
 {
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -53,8 +77,20 @@ int cocos_run_scripts(void)
 
     cocos2d::LuaStack stack;
     stack.setState(L);
-    stack.setXXTEAKeyAndSign(HARNESS_XXTEA_KEY, HARNESS_XXTEA_KEY_LEN,
-                             HARNESS_XXTEA_SIGN, HARNESS_XXTEA_SIGN_LEN);
+    report_vtable_slot(&stack, setter);
+
+    // With HARNESS_ZERO_LEN_KEY set, the key and signature lengths are passed as 0, the way a
+    // fork relying on NUL-terminated strings would. That is what the agent's C-string fallback
+    // is for, and it is otherwise only covered by the Node stub.
+    if (getenv("HARNESS_ZERO_LEN_KEY")) {
+        printf("[engine] setting the key with zero lengths (NUL-terminated strings)\n");
+        stack.setXXTEAKeyAndSign(HARNESS_XXTEA_KEY, 0, HARNESS_XXTEA_SIGN, 0);
+        stack.setXXTEAKeyAndSign(HARNESS_XXTEA_KEY, HARNESS_XXTEA_KEY_LEN,
+                                 HARNESS_XXTEA_SIGN, HARNESS_XXTEA_SIGN_LEN);
+    } else {
+        stack.setXXTEAKeyAndSign(HARNESS_XXTEA_KEY, HARNESS_XXTEA_KEY_LEN,
+                                 HARNESS_XXTEA_SIGN, HARNESS_XXTEA_SIGN_LEN);
+    }
 
     int loaded = 0, failed = 0;
     for (int i = 0; i < HARNESS_CHUNK_COUNT; i++) {

@@ -79,15 +79,27 @@ Chunk names, from `CCLuaStack.cpp` and confirmed on the device:
 | hot update | absolute path in the writable dir | `/data/user/0/<pkg>/files/src/hot.lua` |
 | `executeString` | the source itself (rejected by `LUA_CHUNK_NAME`) | `print('hot path')` |
 
-Two limitations the run surfaced, both harmless but worth knowing:
+It also settled three smaller questions:
 
-- LuaJIT's `lib_package.c` loads embedded bytecode as `luaL_loadbuffer(L, bcdata, ~(size_t)0,
-  name)` — the length is deliberately unknown because the bytecode is self-delimiting. The
-  agent's sanity bound rejects it, so such a chunk is skipped (not dumped, not crashed). Cocos
-  scripts do not come through this path.
-- At `-O2` the runtimes inline `luaL_loadbuffer` into `luaL_loadstring` (Lua 5.1) and
-  `luaL_loadbufferx` into `luaL_loadbuffer` (LuaJIT), so which calls a hook observes depends on
-  the optimisation level the engine was built with.
+- **Bytecode loaded with the length left unknown.** LuaJIT's `lib_package.c` loads embedded
+  bytecode as `luaL_loadbuffer(L, bcdata, ~(size_t)0, name)`, because a dump carries its own end.
+  The agent's sanity bound used to reject that and drop the chunk; it now walks the dump to
+  recover the length. The LuaJIT engine here generates such a chunk on the device (so the
+  bytecode matches the build exactly) and it comes back at its full 35 bytes.
+- **The key setter's vtable slot.** `cocos2d::Ref` has one virtual member and `LuaStack` declares
+  30 more, which puts `setXXTEAKeyAndSign` at slot 29 (`+0xe8` with 64-bit pointers) after the two
+  destructor entries. `harness/luastack.h` transcribes that virtual list from the real header, so
+  the engine can report the slot clang actually gave it — it prints
+  `setXXTEAKeyAndSign is vtable slot 29 (+0xe8 with 64-bit pointers)` in the default-visibility
+  variants, and says the setter isn't exported in the hidden ones. A vtable-walking fallback is
+  not implemented; see TODO.md for why the numbers alone aren't reason enough.
+- **The key hook's C-string fallback.** With `HARNESS_ZERO_LEN_KEY=1` the engine passes the key
+  and signature lengths as 0, the way a fork relying on NUL-terminated strings would, and both are
+  still recovered. That path was broken on a device until the `readCString` fix above.
+
+One limitation stands, harmless but worth knowing: at `-O2` the runtimes inline `luaL_loadbuffer`
+into `luaL_loadstring` (Lua 5.1) and `luaL_loadbufferx` into `luaL_loadbuffer` (LuaJIT), so which
+calls a hook observes depends on the optimisation level the engine was built with.
 
 ## Rebuilding
 
@@ -134,4 +146,10 @@ python harness/run_on_device.py luajit default-unstripped
 ```
 
 `COCONUTS_SERIAL`, `COCONUTS_FRIDA_HOST` and `COCONUTS_REMOTE` override the adb serial, the
-frida-server address and the on-device directory.
+frida-server address and the on-device directory, and any `HARNESS_*` variable is passed through
+to the engine. One `driver` serves every runtime, so it lives at the root of the on-device
+directory rather than beside each library.
+
+The driver waits before it `dlopen()`s the library so the agent can attach first. If the attach is
+slow anyway, the agent arrives after the chunks are already loaded and reports no dumps at all,
+which looks exactly like a broken hook; the runner notices that case and says to re-run instead.

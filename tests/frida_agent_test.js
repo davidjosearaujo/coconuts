@@ -305,6 +305,56 @@ section('[6] chunk dumping and dedup');
 }
 
 // ===========================================================================
+section('[6b] LuaJIT bytecode loaded with the length left unknown');
+// lib_package.c loads embedded bytecode as luaL_loadbuffer(L, bcdata, ~(size_t)0, name), because
+// a dump carries its own end. The agent has to walk it rather than trust the length; verified
+// against real LuaJIT bytecode on a device too.
+{
+    const F = boot('lua.js');
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    const hook = lib.findExportByName('luaL_loadbufferx');
+    const SIZE_MAX = 0xffffffffffffffff;
+
+    // stripped: magic, version, flags=STRIP, one 3-byte prototype, end marker
+    const stripped = Buffer.from([0x1b, 0x4c, 0x4a, 0x02, 0x02, 0x03, 0xaa, 0xbb, 0xcc, 0x00]);
+    // unstripped: the chunk name is a ULEB128 length plus bytes before the prototypes
+    const named = Buffer.from([0x1b, 0x4c, 0x4a, 0x02, 0x00, 0x03, 0x61, 0x62, 0x63,
+                               0x02, 0xaa, 0xbb, 0x00]);
+    for (const [label, dump] of [['stripped', stripped], ['with a chunk name', named]]) {
+        F.clear();
+        // Trailing bytes stand in for whatever else is on the engine's heap behind the dump.
+        const withTail = Buffer.concat([dump, Buffer.alloc(32, 0xff)]);
+        F.fire(hook, [F.int(1), F.alloc(withTail), F.int(SIZE_MAX), F.allocStr('a.luac'), F.int(0)]);
+        const files = F.ofType('file');
+        check('length recovered, ' + label,
+            files.length === 1 && files[0].data.equals(dump),
+            files[0] && files[0].data.length + ' bytes, wanted ' + dump.length);
+    }
+
+    // A ULEB128 length: 0x81 0x01 is 129, so this dump is longer than one byte could express.
+    F.clear();
+    const big = Buffer.concat([Buffer.from([0x1b, 0x4c, 0x4a, 0x02, 0x02, 0x81, 0x01]),
+                               Buffer.alloc(129, 0x55), Buffer.from([0x00])]);
+    F.fire(hook, [F.int(1), F.alloc(big), F.int(SIZE_MAX), F.allocStr('b.luac'), F.int(0)]);
+    check('multi-byte ULEB128 prototype length', F.ofType('file')[0] &&
+        F.ofType('file')[0].data.equals(big), F.ofType('file')[0] &&
+        F.ofType('file')[0].data.length + ' bytes, wanted ' + big.length);
+
+    // Not bytecode, and not a length either: nothing to recover, so nothing is sent.
+    for (const [label, body] of [
+        ['plain source', Buffer.from('print("x")\n')],
+        ['PUC Lua bytecode', Buffer.concat([Buffer.from('\x1bLua\x53'), Buffer.alloc(32)])],
+        ['unknown LuaJIT flags', Buffer.from([0x1b, 0x4c, 0x4a, 0x02, 0x40, 0x01, 0xaa, 0x00])],
+    ]) {
+        F.clear();
+        F.fire(hook, [F.int(1), F.alloc(body), F.int(SIZE_MAX), F.allocStr('c.luac'), F.int(0)]);
+        check('an unknown length is not guessed at: ' + label, F.ofType('file').length === 0,
+            JSON.stringify(F.ofType('file').map((m) => m.payload.path)));
+    }
+}
+
+// ===========================================================================
 section('[7] degenerate hook arguments');
 {
     const F = boot('lua.js');

@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **LuaJIT bytecode loaded with an unknown length is dumped.** LuaJIT's own
+  `lib_package.c` loads embedded bytecode as `luaL_loadbuffer(L, bcdata,
+  ~(size_t)0, name)`, because a dump carries its own end. The agent's sanity
+  bound rejected that length and dropped the chunk; it now walks the dump
+  (`lj_bcread.c`'s format: magic, version, ULEB128 flags, optional chunk name,
+  then length-prefixed prototypes ending at a zero byte) to recover the length.
+  Verified on a device against real LuaJIT bytecode, where the chunk the
+  harness generates comes back at exactly its 35 bytes.
 - **Lua script bundles are unpacked.** Many Lua games ship their scripts as
   one zip that `loadChunksFromZIP` registers as modules. A plain `.zip` now
   has its scripts read straight out of it, and one encrypted as a whole is

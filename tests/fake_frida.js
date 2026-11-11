@@ -15,6 +15,11 @@ function createEnv() {
         isNull() { return this.addr === 0; }
         add(n) { return new P(this.addr + (n instanceof P ? n.addr : Number(n))); }
         equals(o) { return o instanceof P && o.addr === this.addr; }
+        // Frida compares as unsigned, and a size_t argument can be larger than 2^32.
+        compare(o) {
+            const other = o instanceof P ? o.addr : Number(o);
+            return this.addr < other ? -1 : this.addr > other ? 1 : 0;
+        }
         toString() { return '0x' + this.addr.toString(16); }
         toUInt32() { return this.addr >>> 0; }
         toInt32() { return this.addr | 0; }
