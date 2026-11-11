@@ -48,6 +48,7 @@ class TestOutputName:
         ("src/main.jsc", "raw", "src/main.js"),
         # The payload extension is appended to the decrypted name, not swapped for it.
         ("src/main.jsc", "zip", "src/main.js.zip"),
+        ("src.zip", "zip", "src.zip"),  # already a .zip: not doubled
         ("src/main.jsc", "bytecode", "src/main.js.mozjs.jsc"),
         ("src/main.luac", "raw", "src/main.lua"),
         ("src/main.luac", "luabytecode", "src/main.luac"),
@@ -66,6 +67,17 @@ class TestLuaLiveName:
         ("app.MyApp", LUA_SOURCE, "app.MyApp.lua"),
         ("@src/main.lua", LUAJIT_CHUNK, "src/main.luac"),
         ("app.MyApp", LUAJIT_CHUNK, "app.MyApp.luac"),
+        # The forms a real Cocos engine passes (verified on a device).
+        ("assets/src/main.lua", LUA_SOURCE, "src/main.lua"),
+        ("app.views.MainScene", LUA_SOURCE, "app.views.MainScene.lua"),
+        # Hot updates: an absolute path in the app's writable directory.
+        ("/data/user/0/com.example.game/files/src/hot.lua", LUA_SOURCE, "src/hot.lua"),
+        ("/data/data/com.example.game/files/src/hot.lua", LUA_SOURCE, "src/hot.lua"),
+        ("/data/user/0/com.example.game/files/assets/src/hot.lua", LUAJIT_CHUNK, "src/hot.luac"),
+        ("/storage/emulated/0/Android/data/com.example.game/files/src/hot.lua", LUA_SOURCE, "src/hot.lua"),
+        ("/data/user/10/com.example.game/cache/src/hot.lua", LUA_SOURCE, "src/hot.lua"),
+        # Anything else absolute is left as it is (the writer treats it as relative).
+        ("/opt/game/src/main.lua", LUA_SOURCE, "/opt/game/src/main.lua"),
     ])
     def test_name(self, chunk: str, body: bytes, expected: str) -> None:
         assert lua_live_name(chunk, body) == expected
@@ -181,3 +193,23 @@ class TestExtractOffline:
         empty = tmp_path / "empty"
         empty.mkdir()
         assert extract_offline([str(empty)], key, None, str(tmp_path / "out")) == 0
+
+
+class TestXorLuaEndToEnd:
+    """A Lua game whose scripts are repeating-key XOR: no engine library and no key given."""
+
+    def test_recovers_the_key_and_decrypts(self, tmp_path: Path) -> None:
+        from coconuts.ciphers import xor_decrypt
+
+        fx = Path(__file__).parent / "fixtures" / "bytecode"
+        plain = {"src/main.luac": (fx / "lua53.luac").read_bytes(),
+                 "src/app/a.luac": (fx / "lua53_stripped.luac").read_bytes()}
+        root = tmp_path / "game"
+        for rel, blob in plain.items():
+            (root / "assets" / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / "assets" / rel).write_bytes(xor_decrypt(blob, b"xorkey"))
+
+        out = tmp_path / "out"
+        assert extract_offline([str(root)], None, None, str(out)) == 2
+        for rel, blob in plain.items():
+            assert (out / rel).read_bytes() == blob

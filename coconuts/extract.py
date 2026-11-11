@@ -6,15 +6,20 @@ starts with the signature, whatever its extension).
 
 from __future__ import annotations
 
+import collections
 import contextlib
 import functools
+import io
 import logging
 import os
+import re
 import zipfile
+from collections.abc import Callable, Iterator
 
 from .aes import cocos_aes_decrypt
 from .ciphers import (
     LUA_MAGICS,
+    ZIP_MAGIC,
     LuaBytecode,
     cocos_xxtea_decrypt,
     describe_key,
@@ -61,7 +66,7 @@ def output_name(rel: str, kind: str) -> str:
     payload turned out to be (zip archive, SpiderMonkey bytecode, or a compiled Lua chunk)."""
     base = rel[:-1] if rel.lower().endswith((".jsc", ".luac")) else rel
     if kind == "zip":
-        return base + ".zip"
+        return base if base.lower().endswith(".zip") else base + ".zip"
     if kind == "bytecode":
         return base + ".mozjs.jsc"
     if kind == "luabytecode" and base.lower().endswith(".lua"):
@@ -69,10 +74,19 @@ def output_name(rel: str, kind: str) -> str:
     return base
 
 
+# The app's writable directory, which is where a hot update puts its scripts and so where their
+# chunk names point: /data/user/0/<pkg>/files/, /data/data/<pkg>/files/, or the external-storage
+# equivalents. Cocos's getWritablePath() is this directory.
+_WRITABLE_DIR = re.compile(
+    r"^/(?:data/(?:user/\d+|data)|(?:storage/emulated/\d+|sdcard)/Android/data)/[^/]+/(?:files|cache)/")
+
+
 def lua_live_name(chunk_name: str, body: bytes) -> str:
-    """Output path for a live Lua dump. Chunk names are file paths ('@src/main.lua'), sometimes with
-    an assets/ prefix, or module names ('app.MyApp') for scripts loaded from a zip bundle."""
-    name = chunk_name.lstrip("@=")
+    """Output path for a live Lua dump. Chunk names are full file paths as Cocos resolves them
+    ('assets/src/main.lua'), absolute paths in the writable directory for hot updates, or module
+    names ('app.MyApp') for scripts loaded from a zip bundle. A leading '@' or '=' (plain Lua's own
+    convention, which Cocos doesn't use) is dropped too."""
+    name = _WRITABLE_DIR.sub("", chunk_name.lstrip("@="))
     if name.startswith("assets/"):
         name = name[len("assets/"):]
     if not name.lower().endswith((".lua", ".luac")):
@@ -103,10 +117,20 @@ def split_plain_scripts(entries: dict[str, bytes]) -> tuple[dict[str, bytes], di
     return encrypted, plain
 
 
-def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
-                     want) -> dict[str, bytes]:
-    """Collects asset files matching want(rel_lower) from APK zip(s) or local directory path(s)."""
-    entries: dict[str, bytes] = {}
+def _read_file(path: str, n: int | None = None) -> bytes:
+    with open(path, "rb") as f:
+        return f.read(n)
+
+
+def _read_member(zf: zipfile.ZipFile, info: zipfile.ZipInfo, n: int | None = None) -> bytes:
+    with zf.open(info) as f:
+        return f.read(n)
+
+
+def _iter_assets(stack: contextlib.ExitStack,
+                 apk_paths: list[str]) -> Iterator[tuple[str, int, Callable[..., bytes]]]:
+    """Every asset in the APK zip(s) / directories as (path under assets/, size, read), where
+    read(n) returns the first n bytes (all of them by default) and nothing is read until asked."""
     for path in apk_paths:
         if os.path.isdir(path):
             for root, _, files in os.walk(path):
@@ -115,9 +139,7 @@ def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
                     rel = os.path.relpath(full, path).replace("\\", "/")
                     if rel.startswith("assets/"):
                         rel = rel[len("assets/"):]
-                    if want(rel.lower()):
-                        with open(full, "rb") as f:
-                            entries.setdefault(rel, f.read())
+                    yield rel, os.path.getsize(full), functools.partial(_read_file, full)
             continue
 
         try:
@@ -126,18 +148,92 @@ def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
             log.warning("Skipping %s: %s", path, e)
             continue
         for info in zf.infolist():
-            name = info.filename
-            if info.is_dir() or not name.startswith("assets/"):
+            if info.is_dir() or not info.filename.startswith("assets/"):
                 continue
-            rel = name[len("assets/"):]
-            if want(rel.lower()):
-                entries.setdefault(rel, zf.read(info))
+            yield info.filename[len("assets/"):], info.file_size, functools.partial(_read_member, zf, info)
+
+
+Asset = tuple[int, Callable[..., bytes]]  # (size, read): see _iter_assets
+
+
+def _asset_index(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, Asset]:
+    """Every asset by path, without reading any of them. The first input to carry a path wins."""
+    index: dict[str, Asset] = {}
+    for rel, size, read in _iter_assets(stack, apk_paths):
+        index.setdefault(rel, (size, read))
+    return index
+
+
+def _collect_entries(index: dict[str, Asset], want, max_size: int | None = None) -> dict[str, bytes]:
+    """Reads the assets whose path satisfies want(rel_lower); files over max_size bytes are left alone."""
+    entries: dict[str, bytes] = {}
+    for rel, (size, read) in index.items():
+        if not want(rel.lower()):
+            continue
+        if max_size is not None and size > max_size:
+            log.debug("Skipping %s: %d bytes is over the %d byte limit.", rel, size, max_size)
+            continue
+        entries[rel] = read()
     return entries
 
 
+BUNDLE_EXT = ".zip"
+MAX_SCRIPT_BYTES = 256 * 1024 * 1024  # a script bundle bigger than this is a resource pack
+MIN_SIGN_LEN = 2                      # a shorter signature would match arbitrary assets
+
+
+def _zip_members(blob: bytes, only_scripts: bool = False) -> dict[str, bytes] | None:
+    """The files in a zip held in memory, or None if it isn't one."""
+    try:
+        with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+            return {i.filename: zf.read(i) for i in zf.infolist()
+                    if not i.is_dir() and (not only_scripts or i.filename.lower().endswith(SCRIPT_EXTS))}
+    except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as e:
+        log.debug("Not a readable zip: %s", e)
+        return None
+
+
+def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
+    """Replaces each unencrypted .zip by the scripts inside it.
+
+    Lua games often ship their scripts as a zip that LuaStack::loadChunksFromZIP registers as
+    modules. Taken apart here, the entries go through the same plain / encrypted handling as any
+    other script, so an entry that is itself encrypted still counts as a sample for the key
+    search. A zip with no scripts in it is a resource pack and is dropped. A .zip that isn't a
+    zip at all is an encrypted bundle and stays as it is, to be decrypted and unpacked later.
+    """
+    flat = {rel: blob for rel, blob in entries.items()
+            if not (rel.lower().endswith(BUNDLE_EXT) and blob.startswith(ZIP_MAGIC))}
+    for rel, blob in entries.items():
+        if rel not in flat:
+            for name, member in (_zip_members(blob, only_scripts=True) or {}).items():
+                flat.setdefault(name, member)
+    return flat
+
+
 def collect_script_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
-    """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s)."""
-    return _collect_entries(stack, apk_paths, lambda rel: rel.endswith(SCRIPT_EXTS))
+    """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s),
+    plus the scripts inside any script bundle (.zip) that isn't encrypted."""
+    return _flatten_plain_bundles(_collect_entries(
+        _asset_index(stack, apk_paths), lambda rel: rel.endswith(SCRIPT_EXTS + (BUNDLE_EXT,)),
+        MAX_SCRIPT_BYTES))
+
+
+def collect_signed_assets(stack: contextlib.ExitStack, apk_paths: list[str], sign: bytes,
+                          known) -> dict[str, bytes]:
+    """Assets under any extension that start with the script signature, other than `known` paths.
+
+    An encrypted script bundle can be named anything (game.bin, res.dat); what gives it away is
+    the signature the engine looks for before decrypting. Only the first bytes of each asset are
+    read to find out.
+    """
+    if len(sign) < MIN_SIGN_LEN:
+        return {}
+    found: dict[str, bytes] = {}
+    for rel, (size, read) in _asset_index(stack, apk_paths).items():
+        if rel not in known and len(sign) < size <= MAX_SCRIPT_BYTES and read(len(sign)) == sign:
+            found[rel] = read()
+    return found
 
 
 def collect_scripts(apk_paths: list[str], logger: logging.Logger = log) -> dict[str, bytes]:
@@ -175,11 +271,6 @@ def verify_captured_key(key: bytes, encrypted: dict[str, bytes], forced: bytes |
     if all(_key_decrypts(s, key, sign=sign) for s in samples):
         return True, sign, len(samples)
     return False, None, len(samples)
-
-
-def collect_asset_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
-    """Collects every asset file (EncryptManager AES wraps all asset types, not only scripts)."""
-    return _collect_entries(stack, apk_paths, lambda rel: True)
 
 
 class LuaBytecodeReport:
@@ -257,36 +348,78 @@ def _write_plain_scripts(plain: dict[str, bytes], out_dir: str, report: LuaBytec
     return copied
 
 
+def _write_bundle(out_dir: str, members: dict[str, bytes], sign: bytes,
+                  decrypt: Callable[[bytes], bytes | None], report: LuaBytecodeReport) -> list[str]:
+    """Writes the files of a script bundle into the output tree, one result each.
+
+    An entry starting with the signature is encrypted (LuaStack::luaLoadBuffer decrypts those
+    whatever holds them) and is decrypted here; anything else is written as it is.
+    """
+    results: list[str] = []
+    for name, blob in sorted(members.items()):
+        if sign and blob.startswith(sign):
+            blob = decrypt(blob)
+            if blob is None:
+                log.debug("Decryption failed: %s", name)
+                results.append(FAILED)
+                continue
+        elif not name.lower().endswith(SCRIPT_EXTS):
+            results.append(write_output(out_dir, name, blob, report))  # a resource, not a script
+            continue
+        body, kind = unpack_payload(blob)
+        results.append(write_output(out_dir, output_name(name, kind), body, report))
+    return results
+
+
+def _write_payload(out_dir: str, rel: str, plain: bytes, sign: bytes,
+                   decrypt: Callable[[bytes], bytes | None], report: LuaBytecodeReport) -> list[str]:
+    """Writes one decrypted script; a script bundle (a zip) is unpacked into its entries instead."""
+    body, kind = unpack_payload(plain)
+    if kind == "zip":
+        members = _zip_members(body)
+        # Only a zip of scripts is a bundle. A Creator "zip compress" build also wraps a script in
+        # a zip, but that one holds a single .js that isn't named after the file it came from, so
+        # unpacking it would lose the name: it is kept as a .zip instead.
+        if members and any(name.lower().endswith(SCRIPT_EXTS) for name in members):
+            log.info("%s is a script bundle: unpacking %d file(s).", rel, len(members))
+            return _write_bundle(out_dir, members, sign, decrypt, report)
+    return [write_output(out_dir, output_name(rel, kind), body, report)]
+
+
 def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
                          aes: tuple[bytes, bytes, int], out_dir: str) -> int:
-    """EncryptManager AES path: wraps every asset type, so collect and process them all."""
+    """EncryptManager AES path: wraps every asset type, so every asset is processed.
+
+    Only the scripts are held in memory (to check the key against). The rest, which can be
+    hundreds of megabytes of textures and audio, is read, decrypted and written one file at a time.
+    """
     aes_key, aes_iv, aes_roll = aes
-    entries = collect_asset_entries(stack, apk_paths)
-    if not entries:
+    index = _asset_index(stack, apk_paths)
+    if not index:
         log.warning("No asset files found in %d input path(s).", len(apk_paths))
         return 0
 
     # Encrypted scripts are a safe test of the key: once it's confirmed, a file that doesn't decrypt
     # is a genuinely unencrypted resource (copy-list) rather than a wrong-key failure.
     script_entries, _ = split_plain_scripts(
-        {rel: blob for rel, blob in entries.items() if rel.lower().endswith(SCRIPT_EXTS)})
-    verified: bool | None = None
+        _collect_entries(index, lambda rel: rel.endswith(SCRIPT_EXTS), MAX_SCRIPT_BYTES))
     if script_entries:
         samples = _key_samples(script_entries)
-        verified = any(cocos_aes_decrypt(s, aes_key, aes_iv, roll=aes_roll) is not None for s in samples)
-        if not verified:
+        if not any(cocos_aes_decrypt(s, aes_key, aes_iv, roll=aes_roll) is not None for s in samples):
             log.error("The AES key/iv/roll doesn't decrypt the encrypted scripts (wrong key); nothing written.")
             save_raw_fallback(script_entries, out_dir)
             return 0
         log.log(SUCCESS, "AES key verified against %d script(s).", len(samples))
     else:
         log.warning("No encrypted scripts to verify the AES key against; files that don't decrypt are copied as-is.")
+    del script_entries
 
     log.info("Decrypting %d asset(s) into '%s' with EncryptManager AES-256-CBC key=%s iv=%s (roll=%d)...",
-             len(entries), out_dir, aes_key.hex(), aes_iv.hex() or "<default>", aes_roll)
+             len(index), out_dir, aes_key.hex(), aes_iv.hex() or "<default>", aes_roll)
     report = LuaBytecodeReport()
     decrypted = copied = skipped = failed = 0
-    for rel, raw_blob in sorted(entries.items()):
+    for rel, (_size, read) in sorted(index.items()):
+        raw_blob = read()
         plain = cocos_aes_decrypt(raw_blob, aes_key, aes_iv, roll=aes_roll)
         if plain is not None:
             body, kind = unpack_payload(plain)
@@ -328,13 +461,30 @@ def extract_offline(
             return _extract_offline_aes(stack, apk_paths, aes, out_dir)
 
         entries = preloaded_entries if preloaded_entries is not None else collect_scripts(apk_paths)
-        if not entries:
-            log.warning("No .jsc / .luac / .lua files found in %d input path(s).", len(apk_paths))
-            return 0
 
         report = LuaBytecodeReport()
+        known = set(entries)
         entries, plain = split_plain_scripts(entries)
         copied = _write_plain_scripts(plain, out_dir, report)
+
+        # An encrypted bundle can carry any extension, and the only way to find one is by its
+        # signature. When the signature is already given (--sign, or seen by Frida) that can be
+        # done now; otherwise as soon as it has been worked out from the scripts found by name.
+        scanned = False
+
+        def add_signed_assets(sign: bytes) -> None:
+            nonlocal scanned
+            scanned = True
+            extra = collect_signed_assets(stack, apk_paths, sign, known)
+            if extra:
+                log.info("%d more asset(s) start with the script signature (script bundle?).", len(extra))
+                entries.update(extra)
+
+        if forced_sign or exact_sign:
+            add_signed_assets(forced_sign or exact_sign)
+        if not entries and not plain:  # nothing by name, and no signature to find anything by
+            log.warning("No .jsc / .luac / .lua files found in %d input path(s).", len(apk_paths))
+            return 0
         if not entries:
             log.log(SUCCESS, "Done: none of the scripts are encrypted; %d copied to %s.", copied, out_dir)
             report.log()
@@ -352,6 +502,8 @@ def extract_offline(
         sign = choose_signature(forced_sign, entries, exact_sign)
         if sign:
             log.info("Detected %d-byte script signature prefix: %r (hex: %s)", len(sign), sign, sign.hex())
+        if sign and not scanned:
+            add_signed_assets(sign)
 
         if key is None:
             xor_key = recover_xor_key_kp(entries, sign=sign)
@@ -367,26 +519,20 @@ def extract_offline(
 
         cipher_desc = f"XOR key {describe_key(xor_key)}" if xor_key else f"XXTEA key {describe_key(key)}"
 
+        def decrypt(blob: bytes) -> bytes | None:
+            return (xor_decrypt(blob, xor_key, sign=sign) if xor_key
+                    else cocos_xxtea_decrypt(blob, key, sign=sign))
+
         log.info("Decrypting %d asset(s) into '%s' with %s...", len(entries), out_dir, cipher_desc)
-        written = skipped = failed = 0
+        results: collections.Counter[str] = collections.Counter()
         for rel, raw_blob in sorted(entries.items()):
-            plain = (
-                xor_decrypt(raw_blob, xor_key, sign=sign)
-                if xor_key
-                else cocos_xxtea_decrypt(raw_blob, key, sign=sign)
-            )
+            plain = decrypt(raw_blob)
             if plain is None:
-                failed += 1
+                results[FAILED] += 1
                 log.debug("Decryption failed: %s", rel)
                 continue
-            body, kind = unpack_payload(plain)
-            result = write_output(out_dir, output_name(rel, kind), body, report)
-            if result == FAILED:
-                failed += 1
-            elif result == SKIPPED:
-                skipped += 1
-            else:
-                written += 1
+            results.update(_write_payload(out_dir, rel, plain, sign, decrypt, report))
+        written, skipped, failed = results[WRITTEN], results[SKIPPED], results[FAILED]
 
         if failed and not (written or skipped):
             log.error("Every file failed to decrypt; the key is probably wrong for these assets.")

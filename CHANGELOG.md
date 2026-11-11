@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Lua script bundles are unpacked.** Many Lua games ship their scripts as
+  one zip that `loadChunksFromZIP` registers as modules. A plain `.zip` now
+  has its scripts read straight out of it, and one encrypted as a whole is
+  decrypted and then unpacked. Entries that are themselves encrypted are
+  decrypted too, so a plain zip of encrypted scripts still feeds the key
+  search. An encrypted bundle with any other extension (`game.bin`) is found by
+  the script signature, which has to be known: from `--sign`, or learned from
+  scripts found by name. Only a zip holding scripts is unpacked; Creator's
+  "zip compress" output is still saved as `.zip`.
+- **The XOR known-plaintext attack knows compiled Lua.** It used to know only
+  Cocos2d-js headers. PUC Lua 5.1 to 5.4 headers are checked against real
+  bytecode, and LuaJIT's five-byte header recovers single-byte keys. How long a
+  key it can see is bounded by how much plaintext it knows (README).
+- Tests for the previously uncovered `aes.py`, `manifest.py` and `adb.py`, and
+  for the string tiers and key search in `statickeys.py`.
+
+### Changed
+
+- **Hot-updated Lua scripts land beside their packaged counterparts.** Their
+  chunk names are absolute paths in the app's writable directory, which used to
+  nest them under the output folder as `data/user/0/<package>/files/...`. That
+  prefix is now dropped (`/data/user/N/`, `/data/data/`, and the
+  external-storage equivalents).
+- **AES mode streams its assets.** Every asset was read into memory before
+  any was decrypted, which fails on a game with hundreds of megabytes of
+  textures. Only the scripts, which the key is checked against, are held now;
+  everything else is read, decrypted and written one file at a time.
+- A decrypted zip that is already named `.zip` is no longer written as
+  `.zip.zip`.
+
 ### Fixed
 
 Three defects in the Frida agent, all found by running it on a Pixel 7

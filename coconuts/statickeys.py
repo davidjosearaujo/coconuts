@@ -24,11 +24,30 @@ from .arm64 import find_key_and_sign
 from .log import SUCCESS, slog
 from .r2 import _r2_abort_guard
 
-# Known plaintexts from 'Framework: Cocos2d-js' for instant (<1ms) XOR key recovery
+# Known plaintexts for instant (<1ms) XOR key recovery: the first bytes of a script are the same in
+# every game, so the keystream can be read straight off an encrypted file.
+#
+# A repeating key of length k needs a known run of at least 2k bytes to be told from chance, so the
+# length of each header sets the longest key the attack can find: 66 bytes for the Cocos2d-js
+# bundle, 12-33 for the PUC Lua headers, but only 5 for LuaJIT, where just the single-byte keys
+# can be seen.
 KNOWN_PLAINTEXT_HEADERS = [
+    # Cocos2d-js
     b"(function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){",
     b"\x2c\xc0\x73\xb9\x00\x00\x00\x00\x00\x00\x00\x00",  # Compiled SpiderMonkey JS
+    # PUC Lua bytecode, up to and including the format check: version, format, then the sizes of
+    # int / size_t / Instruction (/ lua_Integer / lua_Number) and, from 5.2 on, LUAC_DATA, and from
+    # 5.3 on LUAC_INT and LUAC_NUM. The 5.1 variants are the 64-bit and the 32-bit ARM layouts.
+    bytes.fromhex("1b4c7561510001040804080" "0"),
+    bytes.fromhex("1b4c7561510001040404080" "0"),
+    bytes.fromhex("1b4c75615200010408040800" "19930d0a1a0a"),
+    bytes.fromhex("1b4c756153" "00" "19930d0a1a0a" "0408040808" "7856000000000000" "0000000000" "287740"),
+    bytes.fromhex("1b4c756154" "00" "19930d0a1a0a" "040808" "7856000000000000" "0000000000" "287740"),
 ]
+# LuaJIT: ESC 'L' 'J', the dump version (1 = 2.0, 2 = 2.1), then one flags byte (big-endian 1,
+# stripped 2, FFI 4, FR2 8), which varies between builds and so is enumerated rather than guessed.
+KNOWN_PLAINTEXT_HEADERS += [b"\x1bLJ" + bytes([version, flags])
+                            for version in (1, 2) for flags in range(0, 16, 2)]
 
 _KEY_PATTERNS = [
     re.compile(r"[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{2}"),      # 16
@@ -67,8 +86,8 @@ def _add_string_at(r2, out: dict[str, None], addr: int) -> None:
 
 def recover_xor_key_kp(entries: dict[str, bytes], sign: bytes = b"") -> bytes | None:
     """
-    Known-Plaintext XOR attack from 'Framework: Cocos2d-js'.
-    Recovers repeating XOR keys in <1ms against jsb-builtin.jsc / jsb-engine.jsc / bytecode.
+    Known-plaintext XOR attack against Cocos2d-js bundles and compiled Lua chunks.
+    Recovers repeating XOR keys in <1ms (see KNOWN_PLAINTEXT_HEADERS for which lengths).
     """
     prioritized = sorted(
         entries.items(),

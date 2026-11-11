@@ -102,9 +102,12 @@ them (the hook caught some other call), coconuts discards it and runs the static
 
 First comes an instant **XOR check**: a known-plaintext attack against the files most likely to have
 known contents (`jsb-builtin`, `jsb-engine` and `jsb_polyfill` first). It XORs their opening bytes
-with plaintexts every Cocos2d-js build starts with: the bundle prelude
-`(function(){function r(e,n,t){…` and the SpiderMonkey bytecode magic. A repeating printable key of up
-to 32 bytes falls straight out, in under a millisecond.
+with plaintexts every build starts with: the Cocos2d-js bundle prelude
+`(function(){function r(e,n,t){…`, the SpiderMonkey bytecode magic, and the headers of compiled Lua
+(PUC Lua 5.1 to 5.4 and LuaJIT). A repeating printable key falls straight out, in under a
+millisecond. How long a key it can see depends on how much plaintext it knows: up to 32 bytes for
+the Cocos2d-js prelude, 5 to 16 for PUC Lua headers, and a single byte for LuaJIT, whose header is
+only five bytes.
 
 If that fails, coconuts gathers **XXTEA key candidates** from the engine library, in order of
 likelihood:
@@ -153,9 +156,11 @@ SpiderMonkey bytecode.
 - **Signature prefix.** Some builds prepend a fixed signature to every encrypted file (Cocos's
   `setXXTEAKeyAndSign`). coconuts detects the common prefix across files and strips it. Override with
   `--sign`.
-- **Unpacking.** After decryption, gzip streams are inflated. Zip archives (Creator's "zip compress"
-  option) are saved as `.zip`, SpiderMonkey bytecode as `.mozjs.jsc`, and plain text as `.js`. Lua
-  scripts become `.lua` when they're source, and stay `.luac` when they're compiled bytecode.
+- **Unpacking.** After decryption, gzip streams are inflated. A zip holding scripts is a Lua script
+  bundle and is unpacked (see [Script bundles](#lua-games)); any other zip, such as Creator's "zip
+  compress" option, is saved as `.zip`. SpiderMonkey bytecode is saved as `.mozjs.jsc`, and plain
+  text as `.js`. Lua scripts become `.lua` when they're source, and stay `.luac` when they're
+  compiled bytecode.
 - **Live dumps win.** A file already written by a live dump isn't overwritten, since the live copy is
   what the game actually ran.
 - **AES mode.** `EncryptManager` encrypts every asset type, so every asset is processed. The key is
@@ -182,7 +187,16 @@ differences:
   doesn't fire, the string tiers run as before, with `main.lua` as an extra anchor.
 - **Frida track.** Hooks `xxtea_decrypt` and `LuaStack::setXXTEAKeyAndSign` for the key (the signature
   is logged too), and `luaL_loadbufferx` / `luaL_loadbuffer` for live dumps of every chunk the game
-  loads. Chunks loaded from a zip bundle are named after their module (`app.MyApp.lua`).
+  loads. Chunks loaded from a zip bundle are named after their module (`app.MyApp.lua`). A hot-updated
+  script is loaded from the app's writable directory, and that prefix
+  (`/data/user/0/<package>/files/`) is dropped so it lands beside its packaged counterpart.
+- **Script bundles.** Many Lua games ship their scripts as one zip that `loadChunksFromZIP` registers
+  as modules. coconuts unpacks these: a plain `.zip` has its scripts read straight out of it, and an
+  encrypted one is decrypted and then unpacked. Entries that are themselves encrypted are decrypted
+  too, and the entries land in the output folder under their own paths. An encrypted bundle with any
+  other extension (`game.bin`) is found by the script signature, so it needs the signature to be
+  known: given with `--sign`, or learned from at least two scripts found by name. A bundle that is
+  the only encrypted thing in the APK and has an unusual name can't be spotted without it.
 - **Bytecode.** Many Lua games ship compiled bytecode rather than source. It's decrypted and written
   as `.luac`, and the run reports what it found: PUC Lua 5.1-5.4 or LuaJIT 2.0/2.1, with bitness,
   endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android
@@ -206,10 +220,10 @@ differences:
   don't, so you get `slot0` instead of `a`. And a game shipping a patched LuaJIT opcode table
   produces plausible-looking nonsense with a zero exit code, which nothing can detect for you.
 
-Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
-hooks in particular are untested. Script bundles shipped as one encrypted zip (loaded with
-`loadChunksFromZIP`, often `game.zip` / `src.zip`) aren't collected yet. Open items are tracked in
-[TODO.md](TODO.md).
+Lua support has not been run against a shipped Lua game yet. The Frida hooks have been checked on a
+real arm64 phone against engine libraries built from real Lua 5.1, Lua 5.3 and LuaJIT sources
+(`tests/fixtures/android/`), but the APK-side paths have only seen synthetic assets. Open items are
+tracked in [TODO.md](TODO.md).
 
 ## Supported encryption schemes
 
@@ -217,10 +231,11 @@ hooks in particular are untested. Script bundles shipped as one encrypted zip (l
 |---|---|---|
 | **Cocos XXTEA** (`.jsc`), optionally with a signature prefix | Cocos2d-x JS and Cocos Creator native builds with "encrypt JS" enabled | Static tiers, Frida hooks, or `--key` |
 | **Cocos XXTEA** (`.luac` / `.lua`), optionally with a signature prefix (often `XXTEA`) | Cocos2d-x Lua builds (`LuaStack::setXXTEAKeyAndSign`) | Static tiers, Frida hooks, or `--key` |
-| **Repeating-key XOR** (`.jsc`) | Some modified Cocos2d-js engines | Known-plaintext attack (automatic) |
+| **Repeating-key XOR** (`.jsc`, `.luac`) | Some modified Cocos2d-js engines | Known-plaintext attack (automatic) |
 | **EncryptManager AES-256-CBC** (all assets) | x-studio / axmol `EncryptManager::setEncryptEnabled` | Frida hook, or `--aes-key` / `--aes-iv` |
 
-Payloads can additionally be gzip- or zip-compressed. Both are handled after decryption.
+Payloads can additionally be gzip-compressed, or be a zip of scripts. Both are handled after
+decryption.
 
 For reference, the AES layout is `AES-256-CBC(PKCS7(zlib(plaintext)))` followed by a 16-byte trailer.
 The trailer is encrypted with AES-128-ECB and is valid when `mask ^ sigval == 0xDEADBEEF`. Its key is
@@ -604,7 +619,7 @@ downloads them.
   handled in AES mode.
 - **SpiderMonkey bytecode isn't decompiled.** Lua bytecode can be, with `--decompile` and an
   external decompiler; coconuts never decompiles anything itself.
-- **Lua support hasn't been tested against a real game yet.** See [Lua games](#lua-games).
+- **Lua support hasn't been run against a shipped game yet.** See [Lua games](#lua-games).
 - **With `--pretty`, every `.js` file is reformatted in place**, live dumps included. The minified
   originals aren't kept. `--decompile` is the opposite: it only ever adds `.dec.lua` files.
 
@@ -630,16 +645,22 @@ tests/
 ├── conftest.py            # synthetic assets: encrypted/plain Lua, an APK-shaped zip
 ├── test_ciphers.py        # XXTEA round-trip, signature detection, bytecode identification
 ├── test_extract.py        # output paths, path-traversal refusal, end-to-end decryption
+├── test_bundles.py        # Lua script bundles: plain, encrypted, signed, under any extension
+├── test_aes.py            # EncryptManager AES, and the offline path that streams every asset
+├── test_manifest.py       # binary AndroidManifest.xml parsing, engine-library selection
+├── test_adb.py            # device resolution and APK pulling, against a fake adb
+├── test_android_fixtures.py  # the real arm64 engine libraries below, and r2.py over them
 ├── test_arm64.py          # key/signature recovery, on assembled arm64 libraries
 ├── test_r2.py             # the radare2 paths; skipped when radare2 isn't installed
-├── test_statickeys.py     # static-search helpers, with a stand-in for r2pipe
+├── test_statickeys.py     # string tiers, key search, XOR known-plaintext attack
 ├── test_decompile.py      # --decompile, driven with stand-in decompilers
 ├── test_real_bytecode.py  # the header parser against real bytecode from every Lua runtime
 ├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
 ├── frida_agent_test.js    # the agent's behaviour tests
 ├── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
 ├── fixtures/mkelf.py      # assembles aarch64 .so fixtures (no cross-linker needed)
-└── fixtures/bytecode/     # compiled chunks from PUC Lua 5.1-5.5 and LuaJIT 2.0/2.1
+├── fixtures/bytecode/     # compiled chunks from PUC Lua 5.1-5.5 and LuaJIT 2.0/2.1
+└── fixtures/android/      # real arm64 engine libraries, their harness and a device runner
 ```
 
 ```sh
@@ -667,8 +688,12 @@ regenerates them from lupa's bundled interpreters. Setting `$UNLUAC_JAR` or `$LU
 additionally runs `--decompile` against the real decompilers; without them those tests skip and
 stand-ins cover the plumbing.
 
-What none of this covers is the part that matters most on a real target: whether the symbols and
-struct layouts the Frida hooks assume are the ones the game's engine actually has.
+`tests/fixtures/android/` holds twelve real arm64 `libcocos2dlua.so` builds (Lua 5.1, Lua 5.3 and
+LuaJIT, each in four symbol shapes) with the harness that rebuilds them byte for byte and a script
+that drives the real Frida agent against them on a phone; its README records what that run found.
+
+What none of this covers is a shipped game: whether a real build differs from the Cocos source the
+fixtures are transcribed from.
 
 Two conventions to keep when contributing:
 - `frida`, `r2pipe` and `Crypto` are imported lazily, so unrelated paths work without them.
