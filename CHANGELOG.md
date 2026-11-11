@@ -28,9 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   aren't bundled: point at them with `--unluac` / `--ljd` or `$UNLUAC_JAR` /
   `$LUAJIT_DECOMPILER`. A missing one is reported and the other still runs.
   With no `PACKAGE` and no `--apk`, `--decompile` works over an existing
-  output folder instead of dumping. unluac is verified end to end; the LuaJIT
-  side is not, as luajit-decompiler-v2 is a Windows C++ program that doesn't
-  build on Linux (`--ljd` runs an `.exe` through Wine).
+  output folder instead of dumping. The LuaJIT slot is not tied to one
+  program: any decompiler works that takes the input path last and either
+  prints to stdout or leaves `<stem>.lua` behind. Both halves are verified end
+  to end against real bytecode, with unluac and with ljd.
 - Compiled Lua 5.5 chunks are identified (lupa ships a 5.5 runtime, so real
   5.5 bytecode exists in the wild to test against).
 - The XXTEA key and its signature are read directly from the engine library's

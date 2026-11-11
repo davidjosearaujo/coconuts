@@ -1,8 +1,8 @@
 """The --decompile pass, driven with stand-in decompilers.
 
-unluac and luajit-decompiler-v2 can't be installed from PyPI, so the real ones aren't assumed to be
-present. These fakes stand in for the two output conventions the pass has to cope with: a tool that
-prints to stdout, and one that writes a file of its own.
+The decompilers are GitHub projects rather than PyPI packages, so the real ones aren't assumed to
+be present. These fakes stand in for the two output conventions the pass has to cope with: a tool
+that prints to stdout, and one that writes a file of its own.
 """
 
 from __future__ import annotations
@@ -237,7 +237,7 @@ class TestDecompileDir:
         monkeypatch.setattr(dec.shutil, "which", lambda n: None)
         with caplog.at_level("INFO"):
             dec.decompile_dir(str(dumped), unluac=to_stdout)
-        assert "2 chunk(s) need luajit-decompiler-v2" in caplog.text
+        assert f"2 chunk(s) need {LUAJIT_DECOMPILER}" in caplog.text
         assert "--ljd" in caplog.text                          # says how to point at it
         assert (dumped / "src/legacy.dec.lua").exists()        # the PUC chunk still ran
         assert not (dumped / "src/main.dec.lua").exists()

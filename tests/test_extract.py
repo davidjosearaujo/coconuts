@@ -22,6 +22,8 @@ from coconuts.extract import (
     write_output,
 )
 
+from coconuts.ciphers import LUAJIT_DECOMPILER, UNLUAC
+
 from .conftest import LUA_SOURCE, LUAJIT_CHUNK, PUC_CHUNK, encrypt_asset
 
 
@@ -124,7 +126,7 @@ class TestLuaBytecodeReport:
         text = caplog.text
         assert "2 compiled Lua chunk(s): LuaJIT 2.1 bytecode" in text
         assert "1 compiled Lua chunk(s): PUC Lua 5.1 bytecode" in text
-        assert "luajit-decompiler-v2" in text and "unluac" in text
+        assert LUAJIT_DECOMPILER in text and UNLUAC in text
 
     def test_silent_when_nothing_compiled(self, caplog: pytest.LogCaptureFixture) -> None:
         report = LuaBytecodeReport()
@@ -156,7 +158,8 @@ class TestExtractOffline:
                                    caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level("INFO"):
             extract_offline([source], key, None, str(tmp_path / "out"))
-        assert "LuaJIT 2.1 bytecode (64-bit (GC64), stripped) - decompile with luajit-decompiler-v2" in caplog.text
+        assert ("LuaJIT 2.1 bytecode (64-bit (GC64), stripped) - decompile with "
+                f"{LUAJIT_DECOMPILER}") in caplog.text
         assert "PUC Lua 5.1 bytecode (64-bit) - decompile with unluac" in caplog.text
 
     def test_live_dumps_win_over_offline(self, source: str, tmp_path: Path, key: bytes) -> None:

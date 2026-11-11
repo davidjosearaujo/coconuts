@@ -98,15 +98,16 @@ def parse_args(argv=None):
     p.add_argument("--pretty", action="store_true",
                    help="reformat the dumped .js files in place with jsbeautifier (minified one-liners become readable)")
     p.add_argument("--decompile", action="store_true",
-                   help="decompile the dumped Lua bytecode to <name>.dec.lua, keeping the .luac. Needs "
-                        "unluac and/or luajit-decompiler-v2 (see --unluac / --ljd); each chunk is routed "
-                        "by its own header. With no PACKAGE and no --apk, decompiles an existing OUTPUT "
-                        "dir instead of dumping.")
+                   help="decompile the dumped Lua bytecode to <name>.dec.lua, keeping the .luac. Each "
+                        "chunk is routed by its own header to unluac (PUC Lua) or a LuaJIT decompiler; "
+                        "see --unluac / --ljd. With no PACKAGE and no --apk, decompiles an existing "
+                        "OUTPUT dir instead of dumping.")
     p.add_argument("--unluac", metavar="PATH",
                    help="unluac.jar (or a wrapper) for PUC Lua bytecode; also read from $UNLUAC_JAR")
     p.add_argument("--ljd", metavar="PATH",
-                   help="luajit-decompiler-v2 checkout or main.py for LuaJIT bytecode; also read from "
-                        "$LUAJIT_DECOMPILER")
+                   help="any LuaJIT decompiler, as a checkout, script or binary: ljd (pure Python, "
+                        "runs anywhere) or luajit-decompiler-v2 (better output, Windows-only; its "
+                        ".exe is run through wine). Also read from $LUAJIT_DECOMPILER")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     p.add_argument("--no-color", action="store_true", help="disable coloured output (also honours $NO_COLOR)")
     args = p.parse_args(argv)

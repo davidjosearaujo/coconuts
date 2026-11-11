@@ -47,11 +47,11 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 - [x] **Bytecode decompilation (optional).** `--decompile` routes each chunk to unluac or
   luajit-decompiler-v2 by its header and writes `<name>.dec.lua` beside the bytecode. Verified
   end to end against a real unluac build over real bytecode from every PUC and LuaJIT runtime.
-- [ ] **luajit-decompiler-v2 has never been run.** It's a Windows C++ program (`windows.h`,
-  backslash includes, requires unsigned `char`) and doesn't compile on Linux, so the LuaJIT half of
-  `--decompile` is still untested. Its README says output goes to `output/<name>.lua` beside the
-  exe, which is what the pass expects, and `--ljd` runs an `.exe` through Wine. Confirm on Windows
-  or under Wine, and check whether `-?` offers an output-path flag worth passing.
+- [ ] **luajit-decompiler-v2 itself has never been run.** It's a Windows C++ program (`windows.h`,
+  backslash includes, requires unsigned `char`) and doesn't compile on Linux. The LuaJIT half of
+  `--decompile` is verified against ljd instead, which is pure Python; v2's own README says its
+  output goes to `output/<name>.lua` beside the exe, which is what the pass expects, and `--ljd`
+  runs an `.exe` through Wine. Worth confirming on Windows if anyone wants v2's better output.
 - [ ] **XOR known-plaintext attack for Lua.** It only knows JS headers. Add Lua plaintexts if a Lua
   engine with XOR encryption turns up.
 

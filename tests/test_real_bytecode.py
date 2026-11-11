@@ -113,10 +113,22 @@ class TestRealDecompilers:
     def test_luajit_decompiler(self, dump: Path) -> None:
         ljd = os.environ.get("LUAJIT_DECOMPILER")
         if not ljd:
-            pytest.skip("set LUAJIT_DECOMPILER to run the real luajit-decompiler-v2 "
-                        "(Windows-only; needs Wine elsewhere)")
+            pytest.skip("set LUAJIT_DECOMPILER to run a real LuaJIT decompiler")
         decompile_dir(str(dump), ljd=ljd)
         for stem in ("luajit20", "luajit21", "luajit21_stripped"):
             out = dump / f"src/{stem}.dec.lua"
             assert out.exists(), f"{stem} did not decompile"
             assert "function" in out.read_text()
+        # Unstripped bytecode carries the names; stripped doesn't, and no decompiler invents them.
+        assert "a + b" in (dump / "src/luajit21.dec.lua").read_text()
+        assert "a + b" not in (dump / "src/luajit21_stripped.dec.lua").read_text()
+
+    def test_puc_and_luajit_are_routed_separately(self, dump: Path) -> None:
+        """One run over a folder holding both formats: each chunk goes to the tool that reads it,
+        and neither tool is handed a file it would reject."""
+        jar, ljd = os.environ.get("UNLUAC_JAR"), os.environ.get("LUAJIT_DECOMPILER")
+        if not (jar and ljd):
+            pytest.skip("set both UNLUAC_JAR and LUAJIT_DECOMPILER")
+        decompile_dir(str(dump), unluac=jar, ljd=ljd)
+        assert (dump / "src/lua51.dec.lua").exists()      # PUC -> unluac
+        assert (dump / "src/luajit21.dec.lua").exists()   # LuaJIT -> ljd

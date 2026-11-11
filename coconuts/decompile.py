@@ -1,9 +1,13 @@
 """Post-dump pass (--decompile): run a Lua decompiler over the compiled chunks in the output.
 
-Unlike --pretty, the decompilers can't be bundled: unluac is a Java jar and luajit-decompiler-v2 is
-a GitHub project, neither on PyPI. So they're discovered on PATH, taken from an environment
-variable, or pointed at with --unluac / --ljd, and the pass reports what's missing instead of
-failing. Each chunk is routed by its own header, so a game mixing PUC and LuaJIT chunks is fine.
+Unlike --pretty, the decompilers can't be bundled: they're GitHub projects, not PyPI packages. So
+they're discovered on PATH, taken from an environment variable, or pointed at with --unluac /
+--ljd, and the pass reports what's missing instead of failing. Each chunk is routed by its own
+header, so a game mixing PUC and LuaJIT chunks is fine.
+
+The LuaJIT slot is deliberately not tied to one program: any decompiler works that takes the input
+path as its last argument and either writes to stdout or leaves <stem>.lua behind. ljd and
+luajit-decompiler-v2 both do.
 
 Decompiled source is written beside the bytecode as <name>.dec.lua. It never replaces the .luac:
 decompilation is lossy, and on a game that ships a patched LuaJIT it can produce plausible-looking
@@ -38,9 +42,9 @@ class Tool:
     home: Path | None = None  # where it may drop output files of its own
 
 
-# What a checkout of one of these looks like once it's built. unluac compiles to a jar;
-# luajit-decompiler-v2 is C++ and produces a binary whose name is up to whoever built it, so a
-# built binary sitting at the top of the checkout is accepted under either project's name.
+# What a checkout of one of these looks like once it's built: unluac compiles to a jar, ljd is a
+# Python program run through main.py, and luajit-decompiler-v2 is C++ and produces a binary whose
+# name is up to whoever built it.
 _ENTRY_POINTS = (
     "unluac.jar", "bin/unluac.jar", "build/unluac.jar",
     "luajit-decompiler-v2.exe", "luajit-decompiler-v2", "ljd.exe", "ljd",
@@ -105,9 +109,10 @@ def resolve_tools(unluac: str | None = None, ljd: str | None = None) -> dict[str
 _INSTALL_HINT = {
     UNLUAC: "unluac is a Java program (github.com/HansWessels/unluac): build it with its build.sh, "
             "then pass --unluac /path/to/unluac.jar (or set $UNLUAC_JAR)",
-    LUAJIT_DECOMPILER: "luajit-decompiler-v2 (github.com/marsinator358/luajit-decompiler-v2) is a "
-                       "Windows C++ program: use a release .exe (through Wine on Linux) and pass "
-                       "--ljd /path/to/luajit-decompiler-v2.exe (or set $LUAJIT_DECOMPILER)",
+    LUAJIT_DECOMPILER: "any LuaJIT decompiler will do; ljd (github.com/Aussiemon/ljd) is pure "
+                       "Python and runs anywhere, luajit-decompiler-v2 "
+                       "(github.com/marsinator358/luajit-decompiler-v2) gives better output but is "
+                       "Windows-only. Pass --ljd /path/to/the/checkout (or set $LUAJIT_DECOMPILER)",
 }
 
 

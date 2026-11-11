@@ -188,20 +188,22 @@ differences:
   endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android
   and emits separate 32-bit and 64-bit (GC64) bytecode, so one APK can ship two incompatible
   variants of the same script.
-- **Decompiling.** `--decompile` runs [unluac](https://github.com/HansWessels/unluac) (PUC Lua) or
-  [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2) (LuaJIT) over the
-  output, picking per chunk from its header, and writes `<name>.dec.lua` beside the bytecode, which
-  is always kept. Neither decompiler is on PyPI, so neither is installed with coconuts:
+- **Decompiling.** `--decompile` runs a decompiler over the output, picking one per chunk from its
+  header, and writes `<name>.dec.lua` beside the bytecode, which is always kept. The decompilers are
+  GitHub projects rather than PyPI packages, so none is installed with coconuts:
 
-  - **unluac** is Java. Clone it and run its `build.sh` (needs a JDK), then pass
-    `--unluac path/to/unluac.jar` or the checkout itself. That build handles Lua 5.0-5.3 and
-    refuses 5.4 and 5.5, saying so.
-  - **luajit-decompiler-v2** is a Windows C++ program — it includes `windows.h` and does not
-    compile on Linux or macOS. Use a release `.exe` and run it through Wine (`--ljd` detects an
-    `.exe` and invokes `wine` for you), or run coconuts on Windows.
+  - **PUC Lua** goes to [unluac](https://github.com/HansWessels/unluac), which is Java. Clone it,
+    run its `build.sh` (needs a JDK), then pass `--unluac path/to/unluac.jar` or the checkout
+    itself. That build handles Lua 5.0-5.3 and refuses 5.4 and 5.5, saying so.
+  - **LuaJIT** goes to whatever you point `--ljd` at. Any decompiler works that takes the input
+    path as its last argument and either prints to stdout or leaves `<stem>.lua` behind.
+    [ljd](https://github.com/Aussiemon/ljd) is pure Python and runs anywhere — clone it and pass
+    the checkout. [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2)
+    produces better output but is a Windows C++ program that doesn't compile elsewhere; pass a
+    release `.exe` and `--ljd` runs it through Wine.
 
   Expect two things. Stripped debug info is normal here: control flow comes back but local names
-  don't, so you get `A0_0` instead of `a`. And a game shipping a patched LuaJIT opcode table
+  don't, so you get `slot0` instead of `a`. And a game shipping a patched LuaJIT opcode table
   produces plausible-looking nonsense with a zero exit code, which nothing can detect for you.
 
 Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
@@ -476,7 +478,7 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--pretty` | off | After the dump, reformat every `.js` file in the output folder in place with [jsbeautifier](https://github.com/beautifier/js-beautify), so minified one-line bundles become readable. Prints one progress line per file. Large bundles are slow (a 4 MB one-liner takes about half a minute). |
 | `--decompile` | off | After the dump, decompile every compiled Lua chunk in the output to `<name>.dec.lua`, keeping the `.luac`. Each chunk is routed by its own header: PUC Lua to unluac, LuaJIT to luajit-decompiler-v2. Neither ships with coconuts (see below). With no `PACKAGE` and no `--apk`, decompiles an existing output folder instead of dumping, so a run can be retried after installing a decompiler. |
 | `--unluac PATH` | `$UNLUAC_JAR`, PATH | `unluac.jar`, a built checkout, or a wrapper script, for PUC Lua bytecode. A `.jar` needs a Java runtime. |
-| `--ljd PATH` | `$LUAJIT_DECOMPILER`, PATH | luajit-decompiler-v2 for LuaJIT bytecode: the `.exe`, a built binary, or a directory holding one. A `.exe` is run through `wine` when not on Windows. |
+| `--ljd PATH` | `$LUAJIT_DECOMPILER`, PATH | Any LuaJIT decompiler: a checkout, script or binary. ljd is pure Python and runs anywhere; luajit-decompiler-v2 gives better output but is Windows-only, and its `.exe` is run through `wine`. |
 | `-v`, `--verbose` | off | Debug output: per-file decryption failures, radare2 and Frida details, tracebacks. |
 | `--no-color` | off | Disable ANSI colours. You can also set `NO_COLOR` or `TERM=dumb`. Colours are off automatically when stderr isn't a terminal. |
 

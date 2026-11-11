@@ -21,8 +21,8 @@ LUA_MAGICS = (PUC_LUA_MAGIC, LUAJIT_MAGIC)
 
 # The two Lua toolchains are disjoint, and so are their decompilers, so the flavour is worth
 # reporting: a .luac on its own gives no hint of what opens it.
-UNLUAC = "unluac"                           # PUC Lua 5.0-5.4
-LUAJIT_DECOMPILER = "luajit-decompiler-v2"  # LuaJIT 2.0 / 2.1
+UNLUAC = "unluac"                          # PUC Lua 5.0-5.4; the only tool that reads that format
+LUAJIT_DECOMPILER = "a LuaJIT decompiler"  # ljd or luajit-decompiler-v2 (see decompile.py)
 
 _PUC_VERSIONS = {0x51: "5.1", 0x52: "5.2", 0x53: "5.3", 0x54: "5.4", 0x55: "5.5"}
 _LUAJIT_VERSIONS = {1: "2.0", 2: "2.1"}
