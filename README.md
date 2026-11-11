@@ -593,20 +593,32 @@ coconuts/
 ├── adb.py          # device selection and APK pulling
 ├── pretty.py       # --pretty: jsbeautifier pass over the dumped .js files
 └── extract.py      # asset collection and offline decryption
+
+tests/
+├── conftest.py            # synthetic assets: encrypted/plain Lua, an APK-shaped zip
+├── test_ciphers.py        # XXTEA round-trip, signature detection, bytecode identification
+├── test_extract.py        # output paths, path-traversal refusal, end-to-end decryption
+├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
+├── frida_agent_test.js    # the agent's behaviour tests
+└── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
 ```
 
 ```sh
 git clone https://codeberg.org/davidjosearaujo/coconuts && cd coconuts
-python3 -m venv .venv && . .venv/bin/activate && pip install -e .
+python3 -m venv .venv && . .venv/bin/activate && pip install -e '.[dev]'
 
 python3 -m coconuts --help              # run from the checkout
-python3 -m py_compile coconuts/*.py     # quick syntax check
+python3 -m pytest                       # the test suite
 node --check coconuts/frida_hook.js     # lint the Frida agent
 ```
 
-There's no automated test suite yet. So far coconuts has been checked with synthetic fixtures: encrypt
-a payload the way the engine does, then round-trip it. Turning those into pytest tests is the next
-step.
+The suite is offline and needs no device: the ciphers and the extraction paths run against synthetic
+assets encrypted the way the engine does it, and the Frida agent is rendered through
+`build_frida_script()` and driven against a stubbed Frida runtime — a flat memory space where reads
+outside the mapping fault, so hooks are exercised with the hostile arguments a real process hands
+them. The agent tests skip if Node isn't installed. What this cannot cover is the part that matters
+most on a real target: whether the symbols and struct layouts the hooks assume are the ones the
+game's engine actually has.
 
 Two conventions to keep when contributing:
 - `frida`, `r2pipe` and `Crypto` are imported lazily, so unrelated paths work without them.

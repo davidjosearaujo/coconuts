@@ -26,6 +26,9 @@ dependencies = [
     "jsbeautifier>=1.15.0",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
 [project.scripts]
 coconuts = "coconuts.__main__:main"
 
@@ -34,3 +37,6 @@ packages = ["coconuts"]
 
 [tool.setuptools.package-data]
 coconuts = ["frida_hook.js"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

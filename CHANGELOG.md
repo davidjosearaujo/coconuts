@@ -22,6 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   — and a run reports the flavours it wrote along with the decompiler that
   opens them (`unluac` or `luajit-decompiler-v2`).
 
+- A pytest suite in `tests/`: ciphers, compiled-Lua identification and the
+  offline extraction paths run against synthetic assets, and the Frida agent
+  is rendered through `build_frida_script()` and driven against a stubbed
+  Frida runtime under Node (skipped when Node isn't installed). Install it
+  with `pip install -e '.[dev]'`.
+
 ### Changed
 - When no key works, the untouched scripts go to `raw_scripts/` instead of
   `raw_jsc/`, and log messages say "script(s)" instead of ".jsc".

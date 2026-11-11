@@ -17,3 +17,6 @@ dumped_cocos_assets/
 .DS_Store
 .idea/
 .vscode/
+
+# Tests
+.pytest_cache/

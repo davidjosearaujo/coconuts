@@ -55,5 +55,9 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 
 ## General
 
-- [ ] **Automated tests.** Turn the synthetic fixtures (XXTEA-encrypted JS and Lua scripts, unencrypted
-  Lua, a fake engine library, a zipped fake APK) into a pytest suite.
+- [x] **Automated tests.** `tests/` now has a pytest suite over the ciphers, bytecode identification
+  and the offline extraction paths (synthetic assets, as a directory and as an APK-shaped zip), plus
+  the Frida agent driven against a stubbed Frida runtime under Node.
+- [ ] **Tests for what isn't covered yet.** `statickeys.py` (the tiered search and the XOR
+  known-plaintext attack), `aes.py` / the EncryptManager path, `manifest.py` (engine-library pick,
+  ABI ranking), and `adb.py`. `r2.py` needs radare2, so it probably stays manual.
