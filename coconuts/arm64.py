@@ -26,6 +26,8 @@ Every result is still trial-decrypted by the caller, so a wrong match costs noth
 
 from __future__ import annotations
 
+import functools
+import os
 import struct
 from typing import NamedTuple
 
@@ -226,17 +228,29 @@ def find_key_and_sign(lib_path: str) -> list[KeyAndSign]:
     Never raises: a library that can't be parsed simply yields nothing and the string tiers in
     statickeys.py carry on as before.
     """
+    # Both the exact-pair recovery and the candidate tiers ask for this, and an engine library runs
+    # to tens of megabytes, so the result is memoised for the run rather than read and decoded twice.
+    try:
+        st = os.stat(lib_path)
+    except OSError as e:
+        slog.debug("arm64 key scan: %s", e)
+        return []
+    return list(_scan_library(os.path.abspath(lib_path), (st.st_size, st.st_mtime_ns)))
+
+
+@functools.lru_cache(maxsize=4)
+def _scan_library(lib_path: str, _stamp: tuple[int, int]) -> tuple[KeyAndSign, ...]:
     try:
         with open(lib_path, "rb") as f:
             data = f.read()
     except OSError as e:
         slog.debug("arm64 key scan: %s", e)
-        return []
+        return ()
 
     elf = _Elf(data)
     if not elf.ok:
         slog.debug("arm64 key scan: %s isn't a 64-bit little-endian aarch64 ELF", lib_path)
-        return []
+        return ()
 
     budget = [MAX_SCAN_INSNS]
     results: list[KeyAndSign] = []
@@ -258,4 +272,4 @@ def find_key_and_sign(lib_path: str) -> list[KeyAndSign]:
         unique.setdefault((r.key, r.sign), r)
     if unique:
         slog.debug("arm64 key scan: %d candidate pair(s) from %s", len(unique), lib_path)
-    return list(unique.values())
+    return tuple(unique.values())

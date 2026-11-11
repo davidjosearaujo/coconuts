@@ -6,7 +6,6 @@ Usage, examples and requirements are in `coconuts --help` and the README.
 from __future__ import annotations
 
 import argparse
-import contextlib
 import logging
 import os
 import re
@@ -21,10 +20,9 @@ from .ciphers import (
     _xxtea_c,
     _xxtea_import_error,
     describe_key,
-    detect_signature_prefix,
     normalize_key,
 )
-from .extract import collect_script_entries, extract_offline, split_plain_scripts
+from .extract import choose_signature, collect_scripts, extract_offline, split_plain_scripts
 from .frida_dump import FileWriter, build_frida_script, resolve_frida_targets, run_frida_race
 from .log import SUCCESS, ConsoleFormatter, flog, log, slog, use_color
 from .decompile import decompile_dir
@@ -204,10 +202,7 @@ def main(argv=None) -> int:
                 # win) if the APK doesn't carry it.
                 entries = None
                 if lib_path is None and key is None and aes is None:
-                    with contextlib.ExitStack() as stack:
-                        entries = collect_script_entries(stack, apk_paths)
-                    if entries:
-                        log.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
+                    entries = collect_scripts(apk_paths)
                     if split_plain_scripts(entries)[0]:
                         lib_name = manifest_lib_name if args.apk else read_apk_metadata(apk_paths)[1]
                         lib_path = extract_engine_lib(apk_paths, lib_name, tmp)
@@ -250,13 +245,11 @@ def main(argv=None) -> int:
                 try:
                     apks = args.apk or pull_apks(args.package, serial, tmp, all_splits=args.all_splits)
                     shared_state["apks"] = apks
-                    with contextlib.ExitStack() as stack:
-                        entries = collect_script_entries(stack, apks)
+                    entries = collect_scripts(apks, slog)
                     shared_state["entries"] = entries
                     if not entries:
                         slog.warning("No .jsc / .luac / .lua files found in the APK(s).")
                         return
-                    slog.info("Found %d script(s) across %d input path(s).", len(entries), len(apks))
                     # Unencrypted Lua scripts are copied as-is later; only the rest need (and can test) a key
                     entries, _plain = split_plain_scripts(entries)
                     if not entries:
@@ -274,7 +267,7 @@ def main(argv=None) -> int:
                         slog.info("Frida already captured the key; skipping the static search.")
                         return
 
-                    sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(entries.values()))
+                    sign = choose_signature(forced_sign, entries)
                     if recover_xor_key_kp(entries, sign=sign) is not None:
                         shared_state["static_searched"] = True
                         static_won.set()
@@ -354,7 +347,7 @@ def main(argv=None) -> int:
             # A key from Frida stops the static search, so make sure it actually decrypts the assets
             encrypted = split_plain_scripts(entries)[0] if entries else {}
             if dyn_key and not static_key and encrypted:
-                sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(encrypted.values()))
+                sign = choose_signature(forced_sign, encrypted)
                 samples = _key_samples(encrypted)
                 if all(_key_decrypts(s, dyn_key, sign=sign) for s in samples):
                     flog.log(SUCCESS, "Key verified against %d script(s).", len(samples))

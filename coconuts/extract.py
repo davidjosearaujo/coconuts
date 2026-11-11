@@ -7,6 +7,7 @@ starts with the signature, whatever its extension).
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import os
 import zipfile
@@ -31,9 +32,15 @@ from .statickeys import (
 )
 
 
+@functools.lru_cache(maxsize=16)
+def _realpath(path: str) -> str:
+    """realpath() stats every component, and the output dir is resolved once per written file."""
+    return os.path.realpath(path)
+
+
 def safe_join(base: str, rel: str) -> str:
     """Joins rel onto base, refusing paths that escape base (e.g. '../')."""
-    base_real = os.path.realpath(base)
+    base_real = _realpath(base)
     target = os.path.realpath(os.path.join(base_real, rel.replace("\\", "/").lstrip("/")))
     if os.path.commonpath([base_real, target]) != base_real:
         raise ValueError(f"path escapes output directory: {rel!r}")
@@ -130,6 +137,26 @@ def _collect_entries(stack: contextlib.ExitStack, apk_paths: list[str],
 def collect_script_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
     """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s)."""
     return _collect_entries(stack, apk_paths, lambda rel: rel.endswith(SCRIPT_EXTS))
+
+
+def collect_scripts(apk_paths: list[str], logger: logging.Logger = log) -> dict[str, bytes]:
+    """Collects the scripts from the input paths and reports how many there are."""
+    with contextlib.ExitStack() as stack:
+        entries = collect_script_entries(stack, apk_paths)
+    if entries:
+        logger.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
+    return entries
+
+
+def choose_signature(forced: bytes | None, entries: dict[str, bytes],
+                     exact: bytes | None = None) -> bytes:
+    """The signature to strip: what the user passed, else what was read out of the engine
+    library, else the prefix shared by the encrypted files."""
+    if forced is not None:
+        return forced
+    if exact is not None:
+        return exact
+    return detect_signature_prefix(list(entries.values()))
 
 
 def collect_asset_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
@@ -279,12 +306,10 @@ def extract_offline(
         if aes is not None:
             return _extract_offline_aes(stack, apk_paths, aes, out_dir)
 
-        entries = preloaded_entries if preloaded_entries is not None else collect_script_entries(stack, apk_paths)
+        entries = preloaded_entries if preloaded_entries is not None else collect_scripts(apk_paths)
         if not entries:
             log.warning("No .jsc / .luac / .lua files found in %d input path(s).", len(apk_paths))
             return 0
-        if preloaded_entries is None:
-            log.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
 
         report = LuaBytecodeReport()
         entries, plain = split_plain_scripts(entries)
@@ -304,12 +329,7 @@ def extract_offline(
             if exact is not None:
                 key, exact_sign = exact
 
-        if forced_sign is not None:
-            sign = forced_sign
-        elif exact_sign is not None:
-            sign = exact_sign
-        else:
-            sign = detect_signature_prefix(list(entries.values()))
+        sign = choose_signature(forced_sign, entries, exact_sign)
         if sign:
             log.info("Detected %d-byte script signature prefix: %r (hex: %s)", len(sign), sign, sign.hex())
 

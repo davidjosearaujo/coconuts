@@ -57,6 +57,11 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 
 ## General
 
+- [ ] **AES mode buffers every asset in memory.** `collect_asset_entries` reads all of `assets/`
+  into a dict before decrypting, because EncryptManager wraps every asset type, not just scripts.
+  That is fine for a script-only APK and not for a game with hundreds of MB of textures. Stream
+  each entry through the decrypt-and-write step instead of collecting first.
+
 - [x] **Automated tests.** `tests/` now has a pytest suite over the ciphers, bytecode identification
   and the offline extraction paths (synthetic assets, as a directory and as an APK-shaped zip), plus
   the Frida agent driven against a stubbed Frida runtime under Node.

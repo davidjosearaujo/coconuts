@@ -78,6 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - "Saved N live script dump(s)" counts distinct files, not writes.
 - The three offline write loops share one `write_output` helper, which also
   reports a failed write instead of letting it abort the run.
+- The engine library is scanned for the key/signature call once per run rather
+  than once per caller, script collection and signature precedence each live in
+  one place instead of three, and the output directory is resolved once rather
+  than once per written file.
 
 ## [1.1.0] - 2026-10-28
 
