@@ -21,6 +21,9 @@ const LUA_BRIDGE = 'Java_org_cocos2dx_lib_Cocos2dxLuaJavaBridge_callLuaFunctionW
 const JS_BRIDGE = 'Java_org_cocos2dx_lib_Cocos2dxJavascriptJavaBridge_evalString';
 const LUA_KEY_SYM = '_ZN7cocos2d8LuaStack19setXXTEAKeyAndSignEPKciS2_i';
 const DO_DLOPEN = '__dl__Z9do_dlopenPKciPK17android_dlextinfoPKv';
+// Android 14's linker64 also exports the lambda defined inside do_dlopen, and lists it first.
+const DO_DLOPEN_LAMBDA =
+    '__dl__ZZ9do_dlopenPKciPK17android_dlextinfoPKvENK3$_5clEv.__uniq.250007671217850615957365636956552013758';
 const DUMP_OFF = 0x200, KEY_OFF = 0x300;  // must match test_frida_agent.py
 
 let failures = 0, total = 0;
@@ -39,7 +42,9 @@ function boot(variant, opts) {
     const o = opts || {};
     const F = createEnv();
     if (!o.noLinker) {
-        F.makeModule('linker64', { symbols: o.strippedLinker ? [] : [DO_DLOPEN] });
+        F.makeModule('linker64', {
+            symbols: o.linkerSymbols || (o.strippedLinker ? [] : [DO_DLOPEN]),
+        });
     }
     if (!o.noLibdl) F.makeModule('libdl.so', { exports: ['android_dlopen_ext', 'dlopen'] });
     if (o.preload) o.preload(F);
@@ -64,14 +69,20 @@ const luaLib = (F, extra) => F.makeModule('libcocos2dlua.so', {
 section('[1] installation on a Lua engine');
 {
     const F = boot('lua.js');
-    check('nothing hooked before the engine lib is mapped', F.attached.size === 1, F.attached.size);
+    // do_dlopen plus both public entry points: three loader hooks and nothing engine-side yet.
+    // All three are attached on purpose -- see [8].
+    check('only loader hooks before the engine lib is mapped', F.attached.size === 3, F.attached.size);
     const lib = luaLib(F);
     F.resetStats();
     F.dlopen('libcocos2dlua.so');
 
     check('luaL_loadbufferx hooked', F.attached.has(lib.findExportByName('luaL_loadbufferx').addr));
-    check('luaL_loadbuffer not also hooked (would double-dump)',
-        !F.attached.has(lib.findExportByName('luaL_loadbuffer').addr));
+    // Both loaders are hooked when both exist. On LuaJIT they are two separate functions after
+    // inlining, and the one Cocos calls is luaL_loadbuffer: hooking only luaL_loadbufferx
+    // dumped nothing at all on a real LuaJIT engine. Duplicates are handled by the dedup, which
+    // [6] covers.
+    check('luaL_loadbuffer also hooked (LuaJIT calls this one)',
+        F.attached.has(lib.findExportByName('luaL_loadbuffer').addr));
     check('setXXTEAKeyAndSign hooked', F.attached.has(lib.findExportByName(LUA_KEY_SYM).addr));
     check('export table read at most once', F.stats().enumExportCalls <= 1, F.stats().enumExportCalls);
     check('symbol table read at most once', F.stats().enumSymbolCalls <= 1, F.stats().enumSymbolCalls);
@@ -249,6 +260,35 @@ section('[6] chunk dumping and dedup');
     check('a different chunk name is sent', F.ofType('file').length === 1);
 }
 {
+    // A runtime where luaL_loadbuffer really does chain into luaL_loadbufferx: both hooks fire
+    // for one chunk, and the dedup has to collapse them into a single send.
+    const F = boot('lua.js');
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    const body = Buffer.from('return 1\n');
+    const bodyPtr = F.alloc(body), name = F.allocStr('assets/src/main.lua');
+    F.clear();
+    for (const sym of ['luaL_loadbuffer', 'luaL_loadbufferx']) {
+        F.fire(lib.findExportByName(sym), [F.int(1), bodyPtr, F.int(body.length), name, F.int(0)]);
+    }
+    check('a chunk passing through both loaders is sent once', F.ofType('file').length === 1,
+        F.ofType('file').length);
+}
+{
+    // An alias: both names at one address must not stack two trampolines on one function.
+    const F = boot('lua.js');
+    const lib = F.makeModule('libcocos2dlua.so', {
+        exports: [LUA_BRIDGE, 'luaL_loadbufferx'], symbols: ['luaL_loadbufferx'],
+    });
+    lib._exports.push({ name: 'luaL_loadbuffer', address: lib.findExportByName('luaL_loadbufferx') });
+    F.dlopen('libcocos2dlua.so');
+    const body = Buffer.from('return 2\n');
+    F.clear();
+    F.fire(lib.findExportByName('luaL_loadbufferx'),
+        [F.int(1), F.alloc(body), F.int(body.length), F.allocStr('assets/src/a.lua'), F.int(0)]);
+    check('an aliased loader is hooked once', F.ofType('file').length === 1, F.ofType('file').length);
+}
+{
     // evalString with a non-positive length falls back to a NUL-terminated read.
     const F = boot('js_offsets.js');
     const lib = F.makeModule('libcocos2djs.so', { exports: [JS_BRIDGE], symbols: [] });
@@ -297,7 +337,7 @@ section('[8] loader fallbacks');
     const F = boot('lua.js', { strippedLinker: true });
     const adl = F.modules.find((m) => m.name === 'libdl.so').findExportByName('android_dlopen_ext');
     check('android_dlopen_ext hooked when do_dlopen is missing', F.attached.has(adl.addr));
-    check('the fallback is logged', F.logs(/fell back/).length === 1);
+    check('the fallback is logged', F.logs(/relying on android_dlopen_ext/).length === 1);
     const lib = luaLib(F);
     F.dlopen('libcocos2dlua.so');
     check('engine still hooked through it', F.attached.has(lib.findExportByName('luaL_loadbufferx').addr));
@@ -370,6 +410,81 @@ section('[9] library identification');
     check('an unreadable symbol table does not abort installation', threw === null, threw && threw.message);
     check('export-based hooks still attached', F.attached.has(lib.findExportByName(LUA_KEY_SYM).addr));
     check('and the lost dump hook is reported', F.logs(/live script dumps disabled/).length === 1);
+}
+
+// ===========================================================================
+section('[10] real Cocos chunk names and paths (verified on a Pixel 7)');
+{
+    // The name forms a real engine passes, from cocos2d-x v3 CCLuaStack.cpp:
+    //   executeScriptFile   -> FileUtils::fullPathForFilename(), with no '@' prefix
+    //   loadChunksFromZIP   -> zip entry minus its extension, '/' and '\' turned into '.'
+    //   hot-updated scripts -> an absolute path under the app's writable directory
+    // Each one is placed on the heap with other bytes right behind it, because that is what
+    // killed this on a device: the name was read with a byte count rather than up to the NUL,
+    // so every chunk name came back with ~1000 characters of trailing heap attached and was
+    // rejected by LUA_CHUNK_NAME. Nothing was dumped and nothing was logged.
+    const F = boot('lua.js');
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    const hook = lib.findExportByName('luaL_loadbufferx');
+    const body = Buffer.from('local M = {}\nreturn M\n');
+    const names = [
+        'assets/src/main.lua',
+        'assets/src/app/views/MainScene.lua',
+        'app.views.MainScene',
+        '/data/user/0/com.example.game/files/src/hot.lua',
+        '@src/main.lua',   // the '@' form plain Lua uses, which Cocos itself does not
+    ];
+    for (const n of names) {
+        F.clear();
+        F.fire(hook, [F.int(1), F.alloc(body), F.int(body.length), F.allocStrAmidGarbage(n), F.int(0)]);
+        const files = F.ofType('file');
+        check('name read up to the NUL: ' + n,
+            files.length === 1 && files[0].payload.path === n,
+            files[0] && JSON.stringify(files[0].payload.path.slice(0, 60)));
+        check('body intact: ' + n, files[0] && files[0].data.equals(body));
+    }
+}
+{
+    // Bytecode is binary: it carries NULs and must be read by length, not as a string.
+    const F = boot('lua.js');
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    const luac = Buffer.concat([Buffer.from('\x1bLuaS\x00\x19\x93\r\n\x1a\n'), Buffer.alloc(40)]);
+    F.clear();
+    F.fire(lib.findExportByName('luaL_loadbufferx'),
+        [F.int(1), F.alloc(luac), F.int(luac.length), F.allocStrAmidGarbage('assets/src/main.luac'), F.int(0)]);
+    const files = F.ofType('file');
+    check('bytecode dumped whole', files.length === 1 && files[0].data.equals(luac),
+        files[0] && files[0].data.length);
+}
+
+// ===========================================================================
+section('[11] the loader hook attaches to do_dlopen itself, not a lambda inside it');
+{
+    // On a Pixel 7 (Android 14) linker64 lists the closure inside do_dlopen before do_dlopen.
+    // Taking the first symbol merely containing 'do_dlopen' hooked that closure: the attach
+    // succeeded, installLoaderHook() reported success, and the hook was never called.
+    const F = boot('lua.js', { linkerSymbols: [DO_DLOPEN_LAMBDA, DO_DLOPEN] });
+    const syms = F.modules.find((m) => m.name === 'linker64').enumerateSymbols();
+    const addrOf = (n) => syms.find((s) => s.name === n).address.addr;
+    check('do_dlopen itself is hooked', F.attached.has(addrOf(DO_DLOPEN)));
+    check('the lambda inside it is not', !F.attached.has(addrOf(DO_DLOPEN_LAMBDA)));
+}
+{
+    // Even with do_dlopen hooked, the public entry points are hooked too: attaching to
+    // do_dlopen is not proof that it is on the call path.
+    const F = boot('lua.js');
+    const libdl = F.modules.find((m) => m.name === 'libdl.so');
+    check('android_dlopen_ext hooked as well',
+        F.attached.has(libdl.findExportByName('android_dlopen_ext').addr));
+    check('dlopen hooked as well', F.attached.has(libdl.findExportByName('dlopen').addr));
+    // A library reaching the agent through both hooks must still be instrumented once.
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    F.fire(libdl.findExportByName('dlopen'), [F.allocStr('/lib/libcocos2dlua.so')]);
+    check('a second loader callback does not re-install hooks',
+        F.logs(/Hooks installed/).length === 1, F.logs(/Hooks installed/).length);
 }
 
 console.log('\n' + total + ' checks, ' + (failures || 'no') + ' failure' + (failures === 1 ? '' : 's'));

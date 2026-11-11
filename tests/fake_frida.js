@@ -25,12 +25,28 @@ function createEnv() {
             this._chk(len);
             return MEM.buffer.slice(MEM.byteOffset + this.addr, MEM.byteOffset + this.addr + len);
         }
+        /**
+         * Frida's two readCString modes, which are not variations of one another:
+         *
+         *   readCString()     stops at the NUL.
+         *   readCString(size) reads `size` bytes whatever the string's length is. It does NOT
+         *                     stop at the NUL, and the NUL does not survive decoding, so the
+         *                     result cannot be trimmed back afterwards either.
+         *
+         * Checked against frida 17.24.3 on an arm64 device: readCString(1024) over the
+         * 19-character "assets/src/main.lua" returned 1023 characters, with indexOf('\0')
+         * === -1. The stub used to cap at the NUL in both modes, which is why the agent's
+         * bounded name reads passed here while dumping nothing at all on a real phone.
+         */
         readCString(max) {
             this._chk(1);
-            const cap = max === undefined ? 4096 : max;
-            let end = this.addr;
-            while (end < MEM.length && end - this.addr < cap && MEM[end] !== 0) end++;
-            return MEM.toString('utf8', this.addr, end);
+            if (max === undefined) {
+                let end = this.addr;
+                while (end < MEM.length && MEM[end] !== 0) end++;
+                return MEM.toString('utf8', this.addr, end);
+            }
+            const end = Math.min(this.addr + max, MEM.length);
+            return MEM.toString('utf8', this.addr, end).replace(/\0/g, '');
         }
         readUtf8String(n) { return this.readCString(n); }
         // Reads outside the mapping throw, exactly as they do on a device.
@@ -48,6 +64,15 @@ function createEnv() {
         return new P(at);
     }
     const allocStr = (s) => alloc(Buffer.concat([Buffer.from(s, 'utf8'), Buffer.from([0])]));
+
+    /**
+     * A NUL-terminated string with unrelated bytes right behind it, which is what a chunk name
+     * on the engine's heap actually looks like. Anything that reads the name with a byte count
+     * instead of stopping at the NUL picks the garbage up too.
+     */
+    const allocStrAmidGarbage = (s, pad) => alloc(Buffer.concat([
+        Buffer.from(s, 'utf8'), Buffer.from([0]), Buffer.alloc(pad === undefined ? 256 : pad, 0xff),
+    ]));
 
     /** libc++ std::string: SSO packs the length in byte 0; the long form is {cap, size, data*}. */
     function allocStdString(s, longForm) {
@@ -137,7 +162,8 @@ function createEnv() {
     }
 
     const api = {
-        P, MEM, alloc, allocStr, allocStdString, makeModule, env, messages, attached, timers,
+        P, MEM, alloc, allocStr, allocStrAmidGarbage, allocStdString, makeModule, env, messages,
+        attached, timers,
         modules, fire, runTimers,
         int: (n) => new P(n),
         logs: (re) => messages.filter((m) => m.payload.type === 'log' && re.test(m.payload.msg || '')),

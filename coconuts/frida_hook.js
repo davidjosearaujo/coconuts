@@ -126,6 +126,25 @@ SymbolIndex.prototype.firstExact = function (names) {
     return null;
 };
 
+/**
+ * Every distinct address among `names`. Two names resolving to one address (an alias, or a
+ * build where the wrapper really is a tail call) yield a single entry, so nothing gets hooked
+ * twice at the same place.
+ */
+SymbolIndex.prototype.allExact = function (names) {
+    var out = [];
+    for (var i = 0; i < names.length; i++) {
+        var addr = this.firstExact([names[i]]);
+        if (addr === null || addr.isNull()) continue;
+        var dup = false;
+        for (var j = 0; j < out.length; j++) {
+            if (out[j].equals(addr)) { dup = true; break; }
+        }
+        if (!dup) out.push(addr);
+    }
+    return out;
+};
+
 function matchesAll(name, parts) {
     for (var j = 0; j < parts.length; j++) {
         if (name.indexOf(parts[j]) < 0) return false;
@@ -196,6 +215,29 @@ function readStdString(strPtr) {
     }
 }
 
+/**
+ * Reads a NUL-terminated name (a chunk name, a script path, a library path).
+ *
+ * The size argument of readCString() must not be used for this. On Frida 17 a bounded read
+ * returns `size` bytes whatever the string's own length is, and the NUL does not survive
+ * decoding, so it cannot even be trimmed afterwards: on a device, readCString(1024) over
+ * "assets/src/main.lua" came back as 1023 characters of the heap behind it with no NUL in
+ * sight, and every chunk name was then rejected by LUA_CHUNK_NAME. Reading without a size
+ * stops at the NUL, and an unreadable page throws instead of returning junk, so the length
+ * is checked after the fact rather than up front.
+ */
+function readName(p, maxLen) {
+    if (!p || p.isNull()) return null;
+    var s;
+    try {
+        s = p.readCString();
+    } catch (e) {
+        return null;  // not readable (a bogus pointer, or the mapping ends mid-string)
+    }
+    if (!s || s.length === 0 || s.length > maxLen) return null;
+    return s;
+}
+
 // Reads a (const char *, int len) pair, or a NUL-terminated string when the length slot isn't a
 // plausible length (an overload that takes bare C strings).
 function readCharsAndLen(p, lenArg) {
@@ -203,8 +245,8 @@ function readCharsAndLen(p, lenArg) {
     try {
         var len = lenArg ? lenArg.toUInt32() : 0;
         if (len > 0 && len <= MAX_KEY_LEN) return p.readByteArray(len);
-        var s = p.readCString(MAX_KEY_LEN + 1);
-        if (!s || s.length === 0 || s.length > MAX_KEY_LEN) return null;
+        var s = readName(p, MAX_KEY_LEN);
+        if (s === null) return null;
         return p.readByteArray(s.length);
     } catch (e) {
         return null;
@@ -286,7 +328,7 @@ function hookLuaLoadBuffer(addr) {
             try {
                 var buff = args[1], name = args[3];
                 if (buff.isNull() || name.isNull()) return;
-                var path = name.readCString(MAX_NAME_LEN);
+                var path = readName(name, MAX_NAME_LEN);
                 if (!path || !LUA_CHUNK_NAME.test(path)) return;
                 emitBytes(path, 'lua', buff, args[2].toUInt32());
             } catch (e) {
@@ -303,7 +345,7 @@ function hookEvalString(addr) {
             try {
                 var script = args[1], name = args[4];
                 if (script.isNull() || name.isNull()) return;
-                var path = name.readCString(MAX_NAME_LEN);
+                var path = readName(name, MAX_NAME_LEN);
                 if (!path) return;
                 var len = args[2].toInt32();
                 if (len > 0) {
@@ -391,13 +433,29 @@ function installHooks(lib) {
         ? base.add(DUMP_OFFSET)
         : idx.firstMatching([['ScriptEngine', 'evalString'], ['ScriptingCore', 'evalString']]);
 
-    // luaL_loadbuffer is a wrapper (LuaJIT) or a macro (Lua 5.2+) around luaL_loadbufferx, so
-    // take only the first that resolves; hooking both would dump every chunk twice.
-    var luaLoadAddr = idx.firstExact(['luaL_loadbufferx', 'luaL_loadbuffer']);
+    // Every Lua loader symbol present is hooked, not just the first one found.
+    //
+    // Which symbols exist depends on the runtime: Lua 5.2+ makes luaL_loadbuffer a macro, so
+    // only luaL_loadbufferx is in the binary; Lua 5.1 has only luaL_loadbuffer; LuaJIT declares
+    // both. On LuaJIT the two are NOT one function calling the other in practice. lj_load.c's
+    // luaL_loadbuffer does call luaL_loadbufferx, but they sit in one translation unit and at
+    // -O2 the callee is inlined into the wrapper: on an arm64 device both came out as separate
+    // complete 148-byte functions with no branch between them. Since LuaStack::luaLoadBuffer
+    // calls luaL_loadbuffer, hooking only luaL_loadbufferx dumped nothing at all on a LuaJIT
+    // engine while still reporting a healthy hook.
+    //
+    // Where the two really do chain (an unoptimised build, or an alias at one address), both
+    // hooks fire for the same chunk; alreadySent() drops the duplicate, since it keys on the
+    // chunk name plus a hash of the body.
+    var luaLoadAddrs = idx.allExact(['luaL_loadbufferx', 'luaL_loadbuffer']);
 
-    if (luaLoadAddr !== null && hookLuaLoadBuffer(luaLoadAddr)) attached++;
+    var luaHooks = 0;
+    for (var li = 0; li < luaLoadAddrs.length; li++) {
+        if (hookLuaLoadBuffer(luaLoadAddrs[li])) luaHooks++;
+    }
+    attached += luaHooks;
     if (dumpAddr !== null && hookEvalString(dumpAddr)) attached++;
-    if (luaLoadAddr === null && dumpAddr === null) {
+    if (luaHooks === 0 && dumpAddr === null) {
         logMsg('warning', 'No evalString / luaL_loadbuffer hook found; live script dumps disabled (key capture only).');
     }
 
@@ -493,10 +551,8 @@ var dlopenCallbacks = {
     onEnter: function (args) {
         this.libname = '';
         try {
-            if (!args[0].isNull()) {
-                var p = args[0].readCString(MAX_NAME_LEN);
-                if (p) this.libname = p.split('/').pop();
-            }
+            var p = readName(args[0], MAX_NAME_LEN);
+            if (p) this.libname = p.split('/').pop();
         } catch (e) {}
     },
     onLeave: function () {
@@ -509,10 +565,32 @@ var dlopenCallbacks = {
 };
 
 /**
+ * The address of the linker's do_dlopen, in one pass over its symbol table (it is large, and
+ * this runs on the game's main thread at startup). Ranked rather than first-match: the mangled
+ * function wins outright, a plain symbol containing the name beats a nested entity (the lambda
+ * inside do_dlopen: `_ZZ...`, `$_`, `.__uniq.`), and a nested entity is only a last resort.
+ */
+function findDoDlopen(syms) {
+    var plain = null, nested = null;
+    for (var i = 0; i < syms.length; i++) {
+        var n = syms[i].name;
+        if (n.indexOf('do_dlopen') < 0 || !syms[i].address || syms[i].address.isNull()) continue;
+        if (/(^|_)_Z\d+do_dlopen/.test(n)) return syms[i].address;
+        if (n.indexOf('$_') < 0 && n.indexOf('.__uniq.') < 0) {
+            if (plain === null) plain = syms[i].address;
+        } else if (nested === null) {
+            nested = syms[i].address;
+        }
+    }
+    return plain !== null ? plain : nested;
+}
+
+/**
  * Hooks the loader so the engine lib is instrumented the moment it is mapped. do_dlopen is the
  * linker's internal entry point and returns before the library's .init_array runs, which is what
- * makes it possible to catch a key set from a static initialiser. The public entry points are
- * only a fallback: by the time they return, constructors have already run.
+ * makes it possible to catch a key set from a static initialiser. The public entry points only
+ * return after constructors have already run, so they are the weaker of the two -- but they are
+ * attached as well, because do_dlopen cannot be relied on to be on the call path.
  */
 function installLoaderHook() {
     var linker = null;
@@ -520,32 +598,40 @@ function installLoaderHook() {
         linker = Process.findModuleByName(Process.pointerSize === 4 ? 'linker' : 'linker64');
     } catch (e) {}
 
+    var any = false;
+
     if (linker !== null) {
         var doDlopen = null;
         try {
             var syms = linker.enumerateSymbols();
-            for (var i = 0; i < syms.length; i++) {
-                if (syms[i].name.indexOf('do_dlopen') >= 0 && syms[i].address && !syms[i].address.isNull()) {
-                    doDlopen = syms[i].address;
-                    break;
-                }
-            }
+            // A substring match on 'do_dlopen' is not enough. Android 14's linker64 carries two
+            // such symbols and the lambda inside do_dlopen comes first:
+            //   __dl__ZZ9do_dlopenPKciPK17android_dlextinfoPKvENK3$_5clEv.__uniq.2500...
+            //   __dl__Z9do_dlopenPKciPK17android_dlextinfoPKv            <- the function
+            // Hooking the lambda attaches cleanly and then never fires, which on a Pixel 7
+            // left the agent with no working loader hook at all. So the mangled function name
+            // is preferred, and nested-entity symbols (_ZZ..., $_, .__uniq.) are only used as
+            // a last resort.
+            doDlopen = findDoDlopen(syms);
         } catch (e) {
             logMsg('debug', 'linker symbol scan failed: ' + e);
         }
-        if (doDlopen !== null && safeAttach('do_dlopen', doDlopen, dlopenCallbacks)) return true;
+        if (doDlopen !== null && safeAttach('do_dlopen', doDlopen, dlopenCallbacks)) any = true;
     }
 
+    // The public entry points are attached even when do_dlopen was hooked. Attaching to
+    // do_dlopen succeeding does not prove it is on the call path (see above), and a second
+    // hook costs nothing: tryHook() dedupes by library name and stops once hooks are in.
     var names = ['android_dlopen_ext', 'dlopen'];
-    var any = false;
+    var pub = false;
     for (var n = 0; n < names.length; n++) {
-        if (safeAttach(names[n], globalExport(names[n]), dlopenCallbacks)) any = true;
+        if (safeAttach(names[n], globalExport(names[n]), dlopenCallbacks)) pub = true;
     }
-    if (any) {
-        logMsg('debug', 'do_dlopen unavailable; fell back to android_dlopen_ext/dlopen ' +
+    if (pub && !any) {
+        logMsg('debug', 'do_dlopen unavailable; relying on android_dlopen_ext/dlopen ' +
                         '(a key set from a static initialiser may be missed).');
     }
-    return any;
+    return any || pub;
 }
 
 // The lib may already be mapped (attaching to a running process rather than spawning).

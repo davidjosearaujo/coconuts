@@ -7,6 +7,7 @@ the JS suite, which drives them against a stubbed Frida runtime.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -58,5 +59,8 @@ def test_agent_behaviour(tmp_path: Path) -> None:
 
 def test_placeholders_are_all_substituted() -> None:
     """A leftover __TOKEN__ would be a ReferenceError the moment the agent loads on a device."""
+    # Only placeholder-shaped tokens count: the agent legitimately mentions mangled Android
+    # linker symbols (__dl__Z9do_dlopen..., ...__uniq.250...), which are full of underscores.
+    placeholder = re.compile(r"__[A-Z][A-Z0-9_]*__")
     for args in VARIANTS.values():
-        assert "__" not in build_frida_script(*args).replace("__dl__", ""), args
+        assert not placeholder.search(build_frida_script(*args)), args

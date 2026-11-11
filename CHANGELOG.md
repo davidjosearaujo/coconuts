@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+Three defects in the Frida agent, all found by running it on a Pixel 7
+(Android 14, arm64) against real `libcocos2dlua.so` libraries built from Lua
+5.1.5, Lua 5.3.6 and LuaJIT 2.1 sources. Each one silently disabled live script
+dumping while the agent still reported healthy hooks.
+
+- **Chunk names were read with a byte count, so nothing was ever dumped.**
+  `readCString(size)` on Frida 17 reads `size` bytes regardless of the string's
+  own length, and the NUL does not survive decoding, so the result cannot be
+  trimmed back either: every chunk name arrived with around a thousand
+  characters of trailing heap attached and was rejected by the name filter. The
+  same read was used for `evalString` paths, `dlopen` library names and the
+  key hook's C-string fallback. Names are now read up to the NUL and
+  length-checked afterwards.
+- **The loader hook attached to a lambda inside `do_dlopen`.** Android 14's
+  `linker64` carries two symbols containing `do_dlopen` and lists the closure
+  first, so the agent hooked that, reported success, and was never called — on
+  a Pixel 7 this left no working loader hook at all. The mangled function is
+  now preferred, and the public `android_dlopen_ext` / `dlopen` entry points
+  are hooked as well, since attaching successfully is no proof of being on the
+  call path.
+- **LuaJIT engines dumped nothing.** `luaL_loadbuffer` and `luaL_loadbufferx`
+  share a translation unit in LuaJIT, so at `-O2` the callee is inlined into
+  the wrapper and the two are independent functions. `LuaStack::luaLoadBuffer`
+  calls `luaL_loadbuffer`, so hooking only `luaL_loadbufferx` saw no chunks at
+  all. Every loader symbol present is now hooked; where the two genuinely chain
+  the existing content dedup drops the duplicate.
+
+### Added
+
+- `tests/fixtures/android/`: twelve real arm64 engine libraries (three Lua
+  runtimes × four symbol shapes), the harness that builds them, and a script
+  that drives the real agent against them on a device. `tests/fake_frida.js`
+  now reproduces Frida's actual `readCString` semantics, and
+  `tests/test_android_fixtures.py` also runs coconuts' radare2 path over real
+  compiled libraries instead of only hand-built ELFs.
+
 ## [2.0.1] - 2026-11-11
 
 ### Fixed
