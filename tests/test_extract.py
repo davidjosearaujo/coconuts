@@ -24,7 +24,7 @@ from coconuts.extract import (
 
 from coconuts.ciphers import LUAJIT_DECOMPILER, UNLUAC
 
-from .conftest import LUA_SOURCE, LUAJIT_CHUNK, PUC_CHUNK, encrypt_asset
+from .conftest import LUA_SOURCE, LUAJIT_CHUNK, PUC_CHUNK, encrypt_asset, write_asset_dir
 
 
 class TestSafeJoin:
@@ -204,12 +204,10 @@ class TestXorLuaEndToEnd:
         fx = Path(__file__).parent / "fixtures" / "bytecode"
         plain = {"src/main.luac": (fx / "lua53.luac").read_bytes(),
                  "src/app/a.luac": (fx / "lua53_stripped.luac").read_bytes()}
-        root = tmp_path / "game"
-        for rel, blob in plain.items():
-            (root / "assets" / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / "assets" / rel).write_bytes(xor_decrypt(blob, b"xorkey"))
+        root = write_asset_dir(tmp_path / "game",
+                               {rel: xor_decrypt(blob, b"xorkey") for rel, blob in plain.items()})
 
         out = tmp_path / "out"
-        assert extract_offline([str(root)], None, None, str(out)) == 2
+        assert extract_offline([root], None, None, str(out)) == 2
         for rel, blob in plain.items():
             assert (out / rel).read_bytes() == blob

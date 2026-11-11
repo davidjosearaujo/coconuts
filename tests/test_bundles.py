@@ -7,48 +7,25 @@ directory tree and as an APK-shaped zip, since the two are read by different cod
 
 from __future__ import annotations
 
-import io
-import zipfile
 from pathlib import Path
-
-import pytest
 
 from coconuts.extract import collect_scripts, extract_offline
 
-from .conftest import KEY_TEXT, LUA_SOURCE, LUAJIT_CHUNK, PUC_CHUNK, SIGN, encrypt_asset
+from .conftest import (
+    LUA_SOURCE,
+    LUAJIT_CHUNK,
+    PUC_CHUNK,
+    SIGN,
+    asset_source,
+    encrypt_asset,
+    make_zip,
+)
 
 
-def make_zip(members: dict[str, bytes]) -> bytes:
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        for name, blob in members.items():
-            zf.writestr(name, blob)
-    return buf.getvalue()
-
-
-def build(tmp_path: Path, kind: str, assets: dict[str, bytes]) -> str:
-    """The assets as an extracted tree ('dir') or as an APK-shaped zip ('apk')."""
-    if kind == "dir":
-        root = tmp_path / "game"
-        for rel, blob in assets.items():
-            (root / "assets" / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / "assets" / rel).write_bytes(blob)
-        return str(root)
-    path = tmp_path / "game.apk"
-    with zipfile.ZipFile(path, "w") as zf:
-        for rel, blob in assets.items():
-            zf.writestr(f"assets/{rel}", blob)
-    return str(path)
-
-
-@pytest.fixture(params=["dir", "apk"])
-def kind(request: pytest.FixtureRequest) -> str:
-    return request.param
-
-
-def run(tmp_path: Path, kind: str, assets: dict[str, bytes], key: bytes, **kw) -> tuple[Path, int]:
+def run(tmp_path: Path, kind: str, assets: dict[str, bytes], key: bytes | None,
+        **kw) -> tuple[Path, int]:
     out = tmp_path / "out"
-    return out, extract_offline([build(tmp_path, kind, assets)], key, None, str(out), **kw)
+    return out, extract_offline([asset_source(tmp_path, kind, assets)], key, None, str(out), **kw)
 
 
 class TestPlainBundle:
@@ -80,12 +57,12 @@ class TestPlainBundle:
         pack = make_zip({"img/logo.png": b"\x89PNG", "data/levels.json": b"{}"})
         out, written = run(tmp_path, kind, {"textures.zip": pack}, None)
         assert written == 0
-        assert not out.exists() or not any(out.rglob("*.png"))
+        assert not out.exists() or not list(out.rglob("*")), "nothing should be written"
 
     def test_a_script_beside_a_bundle_wins_over_its_copy(self, tmp_path: Path, kind: str) -> None:
         bundle = make_zip({"src/main.lua": b"-- from the bundle"})
         assets = {"game.zip": bundle, "src/main.lua": LUA_SOURCE}
-        entries = collect_scripts([build(tmp_path, kind, assets)])
+        entries = collect_scripts([asset_source(tmp_path, kind, assets)])
         assert entries["src/main.lua"] == LUA_SOURCE
 
     def test_traversal_in_an_entry_name_is_refused(self, tmp_path: Path, kind: str) -> None:
@@ -145,8 +122,3 @@ class TestEncryptedBundle:
         out, written = run(tmp_path, kind, {"src.zip": broken}, key, forced_sign=SIGN)
         assert written == 1
         assert (out / "src.zip").exists()
-
-
-def test_the_key_used_is_the_suite_key(key: bytes) -> None:
-    from coconuts.ciphers import normalize_key
-    assert key == normalize_key(KEY_TEXT)

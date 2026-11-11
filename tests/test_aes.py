@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import struct
 import tracemalloc
-import zipfile
 import zlib
 from pathlib import Path
 
@@ -25,7 +24,7 @@ from coconuts.aes import (
 )
 from coconuts.extract import extract_offline
 
-from .conftest import LUA_SOURCE, LUAJIT_CHUNK
+from .conftest import LUA_SOURCE, LUAJIT_CHUNK, asset_source, write_asset_dir
 
 KEY, IV, ROLL = b"aes-test-key", b"0123456789abcdef", 5
 
@@ -87,32 +86,20 @@ def assets() -> dict[str, bytes]:
 
 
 def as_apk(tmp_path: Path, assets: dict[str, bytes]) -> str:
-    path = tmp_path / "game.apk"
-    with zipfile.ZipFile(path, "w") as zf:
-        for rel, blob in assets.items():
-            zf.writestr(f"assets/{rel}", blob)
-    return str(path)
+    return asset_source(tmp_path, "apk", assets)
 
 
 class TestOfflineAes:
-    def test_every_asset_type_is_decrypted(self, tmp_path: Path, assets) -> None:
+    def test_every_asset_type_is_decrypted(self, tmp_path: Path, kind: str, assets) -> None:
         out = tmp_path / "out"
-        n = extract_offline([as_apk(tmp_path, assets)], None, None, str(out), aes=(KEY, IV, ROLL))
+        source = asset_source(tmp_path, kind, assets)
+        n = extract_offline([source], None, None, str(out), aes=(KEY, IV, ROLL))
         assert n == 4
         assert (out / "src/main.luac").read_bytes() == LUAJIT_CHUNK
         assert (out / "src/app.lua").read_bytes() == LUA_SOURCE
         assert (out / "res/config.json").read_bytes() == b'{"level": 1}'
         assert (out / "res/logo.png").read_bytes().startswith(b"\x89PNG")
         assert (out / "res/readme.txt").read_bytes() == b"shipped in the clear"  # copied as-is
-
-    def test_directory_input_matches_apk_input(self, tmp_path: Path, assets) -> None:
-        root = tmp_path / "game"
-        for rel, blob in assets.items():
-            (root / "assets" / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / "assets" / rel).write_bytes(blob)
-        out = tmp_path / "out"
-        assert extract_offline([str(root)], None, None, str(out), aes=(KEY, IV, ROLL)) == 4
-        assert (out / "src/app.lua").read_bytes() == LUA_SOURCE
 
     def test_a_wrong_key_writes_nothing_but_the_raw_scripts(self, tmp_path: Path, assets) -> None:
         out = tmp_path / "out"
@@ -149,15 +136,12 @@ class TestOfflineAes:
                           for i in range(count)]
         loose = {f"res/blob{i}.bin": aes_encrypt(b, compress=False) for i, b in enumerate(incompressible)}
         loose["src/app.lua"] = aes_encrypt(LUA_SOURCE)
-        root = tmp_path / "game"
-        for rel, blob in loose.items():
-            (root / "assets" / rel).parent.mkdir(parents=True, exist_ok=True)
-            (root / "assets" / rel).write_bytes(blob)
+        root = write_asset_dir(tmp_path / "game", loose)
         del loose, incompressible
 
         tracemalloc.start()
         try:
-            n = extract_offline([str(root)], None, None, str(tmp_path / "out"), aes=(KEY, IV, ROLL))
+            n = extract_offline([root], None, None, str(tmp_path / "out"), aes=(KEY, IV, ROLL))
             _, peak = tracemalloc.get_traced_memory()
         finally:
             tracemalloc.stop()

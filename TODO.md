@@ -40,14 +40,6 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   `resolve_frida_targets` only matches `ScriptEngine`/`ScriptingCore` `evalString` for `dump_off`,
   never `luaL_loadbufferx`. Not urgent — the agent resolves the Lua loader itself from the export and
   symbol tables — but a stripped lib needs the offset precomputed, like the JS path already does.
-- [ ] **luajit-decompiler-v2 itself has never been run.** It's a Windows C++ program (`windows.h`,
-  backslash includes, requires unsigned `char`) and doesn't compile on Linux. The LuaJIT half of
-  `--decompile` is verified against ljd instead, which is pure Python; v2's own README says its
-  output goes to `output/<name>.lua` beside the exe, which is what the pass expects, and `--ljd`
-  runs an `.exe` through Wine. A prebuilt release does exist (`Mar_24_2024` on its GitHub releases page,
-a PE32+ console binary) and Wine is the route the code already takes, but it hasn't been run: that
-means executing a downloaded Windows binary, which needs a deliberate go-ahead. Worth confirming
-there, or on Windows, if anyone wants v2's better output.
 
 ## General
 

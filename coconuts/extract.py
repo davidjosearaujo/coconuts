@@ -178,6 +178,7 @@ def _collect_entries(index: dict[str, Asset], want, max_size: int | None = None)
 
 
 BUNDLE_EXT = ".zip"
+COLLECTED_EXTS = SCRIPT_EXTS + (BUNDLE_EXT,)   # what collection looks at before anything is read
 MAX_SCRIPT_BYTES = 256 * 1024 * 1024  # a script bundle bigger than this is a resource pack
 MIN_SIGN_LEN = 2                      # a shorter signature would match arbitrary assets
 
@@ -202,12 +203,17 @@ def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
     search. A zip with no scripts in it is a resource pack and is dropped. A .zip that isn't a
     zip at all is an encrypted bundle and stays as it is, to be decrypted and unpacked later.
     """
-    flat = {rel: blob for rel, blob in entries.items()
-            if not (rel.lower().endswith(BUNDLE_EXT) and blob.startswith(ZIP_MAGIC))}
+    flat: dict[str, bytes] = {}
+    bundles: list[bytes] = []
     for rel, blob in entries.items():
-        if rel not in flat:
-            for name, member in (_zip_members(blob, only_scripts=True) or {}).items():
-                flat.setdefault(name, member)
+        if rel.lower().endswith(BUNDLE_EXT) and blob.startswith(ZIP_MAGIC):
+            bundles.append(blob)
+        else:
+            flat[rel] = blob
+    # setdefault, so a script shipped loose keeps its own copy over a bundle's.
+    for blob in bundles:
+        for name, member in (_zip_members(blob, only_scripts=True) or {}).items():
+            flat.setdefault(name, member)
     return flat
 
 
@@ -215,8 +221,7 @@ def collect_script_entries(stack: contextlib.ExitStack, apk_paths: list[str]) ->
     """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s),
     plus the scripts inside any script bundle (.zip) that isn't encrypted."""
     return _flatten_plain_bundles(_collect_entries(
-        _asset_index(stack, apk_paths), lambda rel: rel.endswith(SCRIPT_EXTS + (BUNDLE_EXT,)),
-        MAX_SCRIPT_BYTES))
+        _asset_index(stack, apk_paths), lambda rel: rel.endswith(COLLECTED_EXTS), MAX_SCRIPT_BYTES))
 
 
 def collect_signed_assets(stack: contextlib.ExitStack, apk_paths: list[str], sign: bytes,

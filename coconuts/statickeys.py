@@ -44,10 +44,11 @@ KNOWN_PLAINTEXT_HEADERS = [
     bytes.fromhex("1b4c756153" "00" "19930d0a1a0a" "0408040808" "7856000000000000" "0000000000" "287740"),
     bytes.fromhex("1b4c756154" "00" "19930d0a1a0a" "040808" "7856000000000000" "0000000000" "287740"),
 ]
-# LuaJIT: ESC 'L' 'J', the dump version (1 = 2.0, 2 = 2.1), then one flags byte (big-endian 1,
-# stripped 2, FFI 4, FR2 8), which varies between builds and so is enumerated rather than guessed.
-KNOWN_PLAINTEXT_HEADERS += [b"\x1bLJ" + bytes([version, flags])
-                            for version in (1, 2) for flags in range(0, 16, 2)]
+# LuaJIT: ESC 'L' 'J' and the dump version (1 = 2.0, 2 = 2.1). The flags byte that follows varies
+# between builds, and knowing it would gain nothing: a repeating key needs a known run of 2k bytes
+# to be told from chance, so both 4 and 5 known bytes only ever expose a 1-byte key. Four bytes it
+# is, rather than enumerating the eight plausible flag values for the same result.
+KNOWN_PLAINTEXT_HEADERS += [b"\x1bLJ" + bytes([version]) for version in (1, 2)]
 
 _KEY_PATTERNS = [
     re.compile(r"[0-9a-z]{8}-[0-9a-z]{4}-[0-9a-z]{2}"),      # 16

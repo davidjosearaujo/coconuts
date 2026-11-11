@@ -22,8 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Cocos2d-js headers. PUC Lua 5.1 to 5.4 headers are checked against real
   bytecode, and LuaJIT's five-byte header recovers single-byte keys. How long a
   key it can see is bounded by how much plaintext it knows (README).
+- `--decompile` has now been verified against the real luajit-decompiler-v2
+  (the `Mar_24_2024` release `.exe`, run through Wine): all four LuaJIT 2.0 and
+  2.1 fixtures, stripped and not, decompile and land where coconuts looks for
+  them. Documented in the README.
 - Tests for the previously uncovered `aes.py`, `manifest.py` and `adb.py`, and
-  for the string tiers and key search in `statickeys.py`.
+  for the string tiers and key search in `statickeys.py`. The builders for the
+  two input shapes coconuts accepts (an APK zip, an unpacked directory) are
+  shared from `conftest.py` instead of rewritten per test file.
 
 ### Changed
 

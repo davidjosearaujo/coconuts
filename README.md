@@ -214,7 +214,11 @@ differences:
     [ljd](https://github.com/Aussiemon/ljd) is pure Python and runs anywhere — clone it and pass
     the checkout. [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2)
     produces better output but is a Windows C++ program that doesn't compile elsewhere; pass a
-    release `.exe` and `--ljd` runs it through Wine.
+    release `.exe` and `--ljd` runs it through Wine. This has been run for real (the `Mar_24_2024`
+    release, under Wine 10 on Linux, over LuaJIT 2.0 and 2.1 bytecode, stripped and not). Wine
+    prints a warning that `wine32` is missing the first time it creates a prefix; that is about
+    32-bit programs and can be ignored for this 64-bit binary. Its output starts with a UTF-8 byte
+    order mark. Point `WINEPREFIX` somewhere disposable if you'd rather not use `~/.wine`.
 
   Expect two things. Stripped debug info is normal here: control flow comes back but local names
   don't, so you get `slot0` instead of `a`. And a game shipping a patched LuaJIT opcode table

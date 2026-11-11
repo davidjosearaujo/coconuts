@@ -7,11 +7,11 @@ resource map, start-element chunks) rather than mocking the parser.
 from __future__ import annotations
 
 import struct
-import zipfile
 from pathlib import Path
 
 import pytest
 
+from .conftest import write_zip as make_apk  # a manifest APK is just a zip of named members
 from coconuts.manifest import (
     _lib_candidates,
     extract_engine_lib,
@@ -126,11 +126,6 @@ class TestLibCandidates:
         assert _lib_candidates(None) == ["libcocos.so", "libcocos2djs.so", "libcocos2dlua.so"]
 
 
-def make_apk(path: Path, members: dict[str, bytes]) -> str:
-    with zipfile.ZipFile(path, "w") as zf:
-        for name, blob in members.items():
-            zf.writestr(name, blob)
-    return str(path)
 
 
 class TestReadApkMetadata:

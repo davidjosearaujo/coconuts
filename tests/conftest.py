@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import struct
 import zipfile
 from pathlib import Path
@@ -65,23 +66,62 @@ def assets() -> dict[str, bytes]:
     }
 
 
-@pytest.fixture
-def asset_dir(tmp_path: Path, assets: dict[str, bytes]) -> Path:
-    """An extracted APK tree (assets/... on disk), which --apk also accepts."""
-    root = tmp_path / "game"
+# --- input shapes -----------------------------------------------------------------------------
+# coconuts reads assets from an APK zip or from an unpacked directory, by different code, so most
+# end-to-end tests run against both. These builders are shared rather than rewritten per test file.
+
+
+def write_zip(path: Path, members: dict[str, bytes]) -> str:
+    """A zip of exactly `members` (paths as given, no assets/ prefix added)."""
+    with zipfile.ZipFile(path, "w") as zf:
+        for name, blob in members.items():
+            zf.writestr(name, blob)
+    return str(path)
+
+
+def make_zip(members: dict[str, bytes]) -> bytes:
+    """The same, in memory: a script bundle is a zip held inside an asset."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for name, blob in members.items():
+            zf.writestr(name, blob)
+    return buf.getvalue()
+
+
+def write_asset_dir(root: Path, assets: dict[str, bytes]) -> str:
+    """An unpacked APK tree: the assets under <root>/assets/."""
     for rel, blob in assets.items():
         path = root / "assets" / rel
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(blob)
-    return root
+    return str(root)
+
+
+def write_asset_apk(path: Path, assets: dict[str, bytes], **extras: bytes) -> str:
+    """An APK-shaped zip: the assets under assets/, plus any extra members by name."""
+    return write_zip(path, {f"assets/{rel}": blob for rel, blob in assets.items()} | extras)
+
+
+def asset_source(tmp_path: Path, kind: str, assets: dict[str, bytes]) -> str:
+    """The assets as an unpacked tree ('dir') or an APK-shaped zip ('apk')."""
+    if kind == "dir":
+        return write_asset_dir(tmp_path / "game", assets)
+    return write_asset_apk(tmp_path / "game.apk", assets)
+
+
+@pytest.fixture(params=["dir", "apk"])
+def kind(request: pytest.FixtureRequest) -> str:
+    """Parametrises a test over both input shapes."""
+    return request.param
+
+
+@pytest.fixture
+def asset_dir(tmp_path: Path, assets: dict[str, bytes]) -> Path:
+    """An extracted APK tree (assets/... on disk), which --apk also accepts."""
+    return Path(write_asset_dir(tmp_path / "game", assets))
 
 
 @pytest.fixture
 def apk(tmp_path: Path, assets: dict[str, bytes]) -> Path:
     """A zip shaped like an APK, so the zip reading path is covered too."""
-    path = tmp_path / "game.apk"
-    with zipfile.ZipFile(path, "w") as zf:
-        for rel, blob in assets.items():
-            zf.writestr(f"assets/{rel}", blob)
-        zf.writestr("classes.dex", b"dex\n035\x00")
-    return path
+    return Path(write_asset_apk(tmp_path / "game.apk", assets, **{"classes.dex": b"dex\n035\x00"}))
