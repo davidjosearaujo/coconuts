@@ -46,6 +46,25 @@ _KEY_EXCLUDE = {
 }
 
 
+_ADRP_RE = re.compile(r"adrp\s+(\w+),")
+_ADD_RE = re.compile(r"add\s+(\w+),\s*(\w+),\s*#?(?:0x[0-9a-fA-F]+|\d+)")
+# `psz` prints non-printable bytes as escapes, so binary data comes back as literal "\x7f..."
+# text, which passes str.isprintable() and used to be collected as a candidate key.
+_ESCAPED_RE = re.compile(r"\\[xu]")
+
+
+def _add_string_at(r2, out: dict[str, None], addr: int) -> None:
+    """Reads a C string at `addr` and keeps it if it could plausibly be a key."""
+    if addr <= 0x1000:
+        return
+    try:
+        s = r2.cmd(f"psz @ {addr:#x}").strip()
+    except Exception:
+        return
+    if 3 <= len(s) <= 32 and s.isprintable() and not _ESCAPED_RE.search(s) and s not in _KEY_EXCLUDE:
+        out.setdefault(s, None)
+
+
 def recover_xor_key_kp(entries: dict[str, bytes], sign: bytes = b"") -> bytes | None:
     """
     Known-Plaintext XOR attack from 'Framework: Cocos2d-js'.
@@ -111,14 +130,33 @@ def extract_r2_priority_keys(
                     break
                 r2.cmd(f"af @ {fn_addr:#x}")
                 ops = (r2.cmdj(f"pdfj @ {fn_addr:#x}") or {}).get("ops", [])
+                pages: dict[str, int] = {}  # register -> page base from the last adrp into it
                 for op in ops:
                     if abort_event and abort_event.is_set():
                         break
+                    disasm = op.get("disasm") or ""
+
+                    # arm64 builds a string address as `adrp xN, <page>` + `add xN, xN, #<off>`.
+                    # Only the adrp carries a `ptr`, and it is the 4 KB page base, not the string:
+                    # following it alone reads whatever sits at the page boundary. r2 resolves the
+                    # pair into op["refs"], but only after a full `aaa`, which is far too slow
+                    # here, so the two halves are joined from what the cheap `af` already gives.
+                    adrp = _ADRP_RE.match(disasm)
+                    if adrp:
+                        if op.get("ptr"):
+                            pages[adrp.group(1)] = op["ptr"]
+                        continue
+                    add = _ADD_RE.match(disasm)
+                    if add and add.group(2) in pages and op.get("val") is not None:
+                        _add_string_at(r2, out, pages[add.group(2)] + op["val"])
+                        continue
+
+                    for ref in op.get("refs") or []:  # present when richer analysis has run
+                        if ref.get("type") in ("STRN", "STRING") and ref.get("addr"):
+                            _add_string_at(r2, out, ref["addr"])
                     ptr = op.get("ptr")
                     if ptr and ptr > 0x1000:
-                        s = r2.cmd(f"psz @ {ptr:#x}").strip()
-                        if 3 <= len(s) <= 32 and s.isprintable() and s not in _KEY_EXCLUDE:
-                            out.setdefault(s, None)
+                        _add_string_at(r2, out, ptr)
     except Exception as e:
         slog.debug("Tier-0 r2 key extraction skipped: %s", e)
     finally:

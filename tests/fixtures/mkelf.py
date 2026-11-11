@@ -45,12 +45,17 @@ def nop() -> int:
 # --- ELF assembly -----------------------------------------------------------------------------
 
 EM_AARCH64 = 183
-BASE = 0x1000
+# Android shared objects are linked at base vaddr 0, so virtual addresses equal file
+# offsets and a Frida hook offset is just the symbol's vaddr. .text is placed a page in,
+# where a real library's code starts, so addresses are realistic.
+BASE = 0
+TEXT_OFF = 0x1000
 
 
 def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, int] | None = None,
           decoy_strings: tuple[bytes, ...] = (), swap_arg_order: bool = False,
-          wrong_lengths: bool = False, trailing_call_string: bytes | None = None) -> bytes:
+          wrong_lengths: bool = False, trailing_call_string: bytes | None = None,
+          stub_symbols: tuple[str, ...] = ()) -> bytes:
     """Returns a shared object whose applicationDidFinishLaunching makes the key/sign call."""
     # .rodata: decoys first so the real strings are not simply the first ones in the section.
     rodata = bytearray()
@@ -60,10 +65,15 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
         offsets[bytes(blob)] = len(rodata)
         rodata += blob + b"\0"
 
-    # Lay out .text then .rodata inside one PT_LOAD.
-    text_vaddr = BASE
-    n_insn = 12 + (3 if trailing_call_string else 0)
-    rodata_vaddr = (text_vaddr + n_insn * 4 + 0xF) & ~0xF
+    # Lay out .text then .rodata inside one PT_LOAD. Virtual addresses are kept equal to file
+    # offsets: tools that map by program header (radare2 among them) would otherwise read the wrong
+    # bytes, while anything reading section headers would not notice.
+    # Each stub symbol gets its own one-instruction function, so it does not split the
+    # main one: radare2 stops analysing at the next function boundary.
+    n_insn = 12 + (3 if trailing_call_string else 0) + len(stub_symbols)
+    text_off = TEXT_OFF
+    rodata_off = (text_off + n_insn * 4 + 0xF) & ~0xF
+    text_vaddr, rodata_vaddr = BASE + text_off, BASE + rodata_off
     key_at = rodata_vaddr + offsets[bytes(key)]
     sign_at = rodata_vaddr + offsets[bytes(sign)]
 
@@ -99,6 +109,8 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
             put(blr(5))
         put(nop())
         put(ret())
+        for _ in stub_symbols:
+            put(ret())
         assert len(out) == n_insn, len(out)
         return out
 
@@ -106,7 +118,10 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
     rodata = bytes(rodata)
 
     syms = ({"_ZN11AppDelegate29applicationDidFinishLaunchingEv": text_vaddr}
-            if symbols is None else symbols)
+            if symbols is None else dict(symbols))
+    main_insns = n_insn - len(stub_symbols)
+    for i, stub in enumerate(stub_symbols):
+        syms[stub] = text_vaddr + (main_insns + i) * 4
 
     # .strtab / .symtab
     strtab = bytearray(b"\0")
@@ -115,7 +130,8 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
         name_off = len(strtab)
         strtab += name.encode() + b"\0"
         # st_name, st_info(GLOBAL|FUNC), st_other, st_shndx(.text=1), st_value, st_size
-        sym_entries.append(struct.pack("<IBBHQQ", name_off, (1 << 4) | 2, 0, 1, value, 4))
+        size = len(text) if value == text_vaddr else 4
+        sym_entries.append(struct.pack("<IBBHQQ", name_off, (1 << 4) | 2, 0, 1, value, size))
     symtab = b"".join(sym_entries)
 
     shstrtab = bytearray(b"\0")
@@ -127,10 +143,9 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
     ehsize, phentsize, shentsize = 64, 56, 64
     phoff = ehsize
     phnum = 1
-    file_text = phoff + phnum * phentsize
-    file_text = (file_text + 0xF) & ~0xF
-    # Keep file offsets congruent to vaddrs modulo page size for a sane PT_LOAD.
-    file_rodata = file_text + (rodata_vaddr - text_vaddr)
+    # vaddr == BASE + file offset throughout, so the single PT_LOAD maps one to one.
+    file_text = text_off
+    file_rodata = rodata_off
     file_symtab = file_rodata + len(rodata)
     file_strtab = file_symtab + len(symtab)
     file_shstr = file_strtab + len(strtab)
@@ -148,7 +163,7 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
     load_size = file_shstr + len(shstrtab)
     struct.pack_into("<IIQQQQQQ", out, phoff,
                      1, 5,         # PT_LOAD, R+X
-                     0, 0, 0, load_size, load_size, 0x1000)
+                     0, BASE, BASE, load_size, load_size, 0x1000)
 
     out[file_text:file_text + len(text)] = text
     out[file_rodata:file_rodata + len(rodata)] = rodata

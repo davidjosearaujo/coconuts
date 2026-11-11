@@ -60,7 +60,9 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 - [x] **Automated tests.** `tests/` now has a pytest suite over the ciphers, bytecode identification
   and the offline extraction paths (synthetic assets, as a directory and as an APK-shaped zip), plus
   the Frida agent driven against a stubbed Frida runtime under Node.
-- [ ] **Tests for what isn't covered yet.** `statickeys.py` (the tiered search and the XOR
-  known-plaintext attack), `aes.py` / the EncryptManager path, `manifest.py` (engine-library pick,
-  ABI ranking), and `adb.py`. `r2.py` needs radare2, so it probably stays manual. `decompile.py` is
-  covered with stand-in decompilers, never the real ones.
+- [ ] **Tests for what isn't covered yet.** The rest of `statickeys.py` (the tiers themselves and
+  the XOR known-plaintext attack), `aes.py` / the EncryptManager path, `manifest.py`
+  (engine-library pick, ABI ranking), and `adb.py`. `decompile.py` is covered with stand-in
+  decompilers, never the real ones. `r2.py` and Tier 0 now have tests that run when radare2 is
+  installed; `find_key_function` and `find_string_xref_function` still don't, since they need a
+  library carrying the needle strings and realistic call graphs.

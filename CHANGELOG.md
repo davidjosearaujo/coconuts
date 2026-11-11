@@ -48,6 +48,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Frida runtime under Node (skipped when Node isn't installed). Install it
   with `pip install -e '.[dev]'`.
 
+### Fixed
+- Tier 0 missed every string an arm64 build references, which is nearly all of
+  them. A string address is formed as `adrp` (4 KB page) + `add` (offset), and
+  only the `adrp` carries radare2's `ptr` field, so following it read whatever
+  sat at the page boundary -- for the first page, the ELF header, which then
+  entered the candidate list as a key. radare2 does resolve the pair, but only
+  after a full `aaa`, far too slow for this pass, so the two halves are now
+  joined from what the cheap single-function analysis already reports.
+- Binary data could be collected as a candidate key: `psz` escapes
+  non-printable bytes, and the resulting `\x7fELF...` text passes
+  `str.isprintable()`.
+
 ### Changed
 - When no key works, the untouched scripts go to `raw_scripts/` instead of
   `raw_jsc/`, and log messages say "script(s)" instead of ".jsc".

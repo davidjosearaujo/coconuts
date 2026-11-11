@@ -629,6 +629,8 @@ tests/
 ├── test_ciphers.py        # XXTEA round-trip, signature detection, bytecode identification
 ├── test_extract.py        # output paths, path-traversal refusal, end-to-end decryption
 ├── test_arm64.py          # key/signature recovery, on assembled arm64 libraries
+├── test_r2.py             # the radare2 paths; skipped when radare2 isn't installed
+├── test_statickeys.py     # static-search helpers, with a stand-in for r2pipe
 ├── test_decompile.py      # --decompile, driven with stand-in decompilers
 ├── test_real_bytecode.py  # the header parser against real bytecode from every Lua runtime
 ├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
@@ -652,6 +654,10 @@ assets encrypted the way the engine does it, and the Frida agent is rendered thr
 `build_frida_script()` and driven against a stubbed Frida runtime — a flat memory space where reads
 outside the mapping fault, so hooks are exercised with the hostile arguments a real process hands
 them. The agent tests skip if Node isn't installed.
+
+The radare2 paths have their own tests, skipped when radare2 isn't installed -- which is worth
+knowing when reading a passing run, since with radare2 absent Tier 0 silently returns nothing and a
+defect in it looks exactly like a missing dependency.
 
 Bytecode identification is checked against `tests/fixtures/bytecode/`, real compiled chunks from
 every PUC Lua and LuaJIT runtime rather than headers written by hand; `tests/fixtures/gen_bytecode.py`
