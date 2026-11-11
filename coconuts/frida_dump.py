@@ -18,7 +18,7 @@ import time
 
 from .aes import aes_roll_from_flags
 from .ciphers import describe_key, normalize_key
-from .extract import jsc_to_js, lua_live_name, safe_join
+from .extract import LuaBytecodeReport, jsc_to_js, lua_live_name, safe_join
 from .log import SUCCESS, flog
 from .r2 import (
     EVAL_STRING_NEEDLES,
@@ -39,6 +39,8 @@ class FileWriter:
     def __init__(self, base_dir: str):
         self.base_dir = base_dir
         self.saved = 0
+        self._written: set[str] = set()  # distinct output paths, so a rewrite isn't counted twice
+        self._lua = LuaBytecodeReport()
         self._q: queue.Queue = queue.Queue()
         self._t = threading.Thread(target=self._run, name="file-writer")
         self._t.start()
@@ -51,6 +53,7 @@ class FileWriter:
         self._t.join()
         if self.saved:
             flog.log(SUCCESS, "Saved %d live script dump(s) to %s", self.saved, self.base_dir)
+            self._lua.log(flog)
 
     def _run(self) -> None:
         while True:
@@ -63,8 +66,14 @@ class FileWriter:
                 os.makedirs(os.path.dirname(out_path), exist_ok=True)
                 with open(out_path, "wb") as f:
                     f.write(data)
-                self.saved += 1
-                flog.info("Live dump: %s", out_path)
+                if out_path in self._written:
+                    # The agent only re-sends a chunk whose body changed (hot update).
+                    flog.debug("Live dump updated: %s", out_path)
+                else:
+                    self._written.add(out_path)
+                    self._lua.add(data)
+                    self.saved += 1
+                    flog.info("Live dump: %s", out_path)
             except (OSError, ValueError) as e:
                 flog.warning("Could not write live dump %r: %s", rel_path, e)
 

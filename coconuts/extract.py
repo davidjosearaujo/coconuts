@@ -7,14 +7,17 @@ starts with the signature, whatever its extension).
 from __future__ import annotations
 
 import contextlib
+import logging
 import os
 import zipfile
 
 from .aes import cocos_aes_decrypt
 from .ciphers import (
     LUA_MAGICS,
+    LuaBytecode,
     cocos_xxtea_decrypt,
     describe_key,
+    describe_lua_bytecode,
     detect_signature_prefix,
     unpack_payload,
     xor_decrypt,
@@ -129,6 +132,27 @@ def collect_asset_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> 
     return _collect_entries(stack, apk_paths, lambda rel: True)
 
 
+class LuaBytecodeReport:
+    """Counts the flavours of the compiled Lua chunks written in a run.
+
+    A decrypted .luac gives no hint of what opens it, and the PUC Lua and LuaJIT toolchains need
+    different decompilers, so the run reports which it produced.
+    """
+
+    def __init__(self) -> None:
+        self._counts: dict[LuaBytecode, int] = {}
+
+    def add(self, blob: bytes) -> None:
+        flavour = describe_lua_bytecode(blob)
+        if flavour is not None:
+            self._counts[flavour] = self._counts.get(flavour, 0) + 1
+
+    def log(self, logger: logging.Logger = log) -> None:
+        for flavour, count in sorted(self._counts.items(), key=lambda kv: (-kv[1], kv[0].label)):
+            logger.info("%d compiled Lua chunk(s): %s - decompile with %s",
+                        count, flavour.label, flavour.tool)
+
+
 def save_raw_fallback(entries: dict[str, bytes], out_dir: str) -> None:
     raw_dir = os.path.join(out_dir, RAW_FALLBACK_DIR)
     log.info("Saving %d undecrypted script(s) to %s for manual inspection.", len(entries), raw_dir)
@@ -142,24 +166,44 @@ def save_raw_fallback(entries: dict[str, bytes], out_dir: str) -> None:
             log.warning("Could not save raw script %s: %s", rel, e)
 
 
-def _write_plain_scripts(plain: dict[str, bytes], out_dir: str) -> int:
+WRITTEN, SKIPPED, FAILED = "written", "skipped", "failed"
+
+
+def write_output(out_dir: str, rel: str, body: bytes, report: LuaBytecodeReport | None = None) -> str:
+    """Writes one decrypted/copied file into the output tree.
+
+    Returns WRITTEN, SKIPPED (a live dump already claimed the path and wins) or FAILED (the path
+    escapes the output directory, or the write itself failed).
+    """
+    try:
+        out_path = safe_join(out_dir, rel)
+    except ValueError as e:
+        log.warning("Skipping: %s", e)
+        return FAILED
+    if os.path.exists(out_path):  # live dumps take precedence
+        return SKIPPED
+    try:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        with open(out_path, "wb") as f:
+            f.write(body)
+    except OSError as e:
+        log.warning("Could not write %s: %s", rel, e)
+        return FAILED
+    if report is not None:
+        report.add(body)
+    return WRITTEN
+
+
+def _write_plain_scripts(plain: dict[str, bytes], out_dir: str, report: LuaBytecodeReport) -> int:
     """Copies unencrypted Lua scripts to the output (renamed like decrypted ones); returns the count."""
     if not plain:
         return 0
     log.info("%d Lua script(s) aren't encrypted; copying them as-is.", len(plain))
     copied = 0
     for rel, blob in sorted(plain.items()):
-        try:
-            out_path = safe_join(out_dir, output_name(rel, unpack_payload(blob)[1]))
-        except ValueError as e:
-            log.warning("Skipping: %s", e)
-            continue
-        if os.path.exists(out_path):  # live dumps take precedence
-            continue
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "wb") as f:
-            f.write(blob)
-        copied += 1
+        out_rel = output_name(rel, unpack_payload(blob)[1])
+        if write_output(out_dir, out_rel, blob, report) == WRITTEN:
+            copied += 1
     return copied
 
 
@@ -190,6 +234,7 @@ def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
 
     log.info("Decrypting %d asset(s) into '%s' with EncryptManager AES-256-CBC key=%s iv=%s (roll=%d)...",
              len(entries), out_dir, aes_key.hex(), aes_iv.hex() or "<default>", aes_roll)
+    report = LuaBytecodeReport()
     decrypted = copied = skipped = failed = 0
     for rel, raw_blob in sorted(entries.items()):
         plain = cocos_aes_decrypt(raw_blob, aes_key, aes_iv, roll=aes_roll)
@@ -198,25 +243,19 @@ def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
             out_rel = output_name(rel, kind)
         else:
             body, out_rel = raw_blob, rel  # unencrypted resource (or unverifiable): preserve verbatim
-        try:
-            out_path = safe_join(out_dir, out_rel)
-        except ValueError as e:
+        result = write_output(out_dir, out_rel, body, report)
+        if result == FAILED:
             failed += 1
-            log.warning("Skipping: %s", e)
-            continue
-        if os.path.exists(out_path):  # live dumps take precedence
+        elif result == SKIPPED:
             skipped += 1
-            continue
-        os.makedirs(os.path.dirname(out_path), exist_ok=True)
-        with open(out_path, "wb") as f:
-            f.write(body)
-        if plain is not None:
+        elif plain is not None:
             decrypted += 1
         else:
             copied += 1
 
     log.log(SUCCESS, "Done: %d decrypted, %d copied as-is, %d skipped (already dumped live) into %s.",
             decrypted, copied, skipped, out_dir)
+    report.log()
     if failed:
         log.warning("%d file(s) skipped (unsafe output path).", failed)
     return decrypted
@@ -242,10 +281,12 @@ def extract_offline(
         if preloaded_entries is None:
             log.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
 
+        report = LuaBytecodeReport()
         entries, plain = split_plain_scripts(entries)
-        copied = _write_plain_scripts(plain, out_dir)
+        copied = _write_plain_scripts(plain, out_dir, report)
         if not entries:
             log.log(SUCCESS, "Done: none of the scripts are encrypted; %d copied to %s.", copied, out_dir)
+            report.log()
             return copied
 
         xor_key: bytes | None = None
@@ -280,20 +321,13 @@ def extract_offline(
                 log.debug("Decryption failed: %s", rel)
                 continue
             body, kind = unpack_payload(plain)
-            out_rel = output_name(rel, kind)
-            try:
-                out_path = safe_join(out_dir, out_rel)
-            except ValueError as e:
+            result = write_output(out_dir, output_name(rel, kind), body, report)
+            if result == FAILED:
                 failed += 1
-                log.warning("Skipping: %s", e)
-                continue
-            if os.path.exists(out_path):  # live dumps take precedence
+            elif result == SKIPPED:
                 skipped += 1
-                continue
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, "wb") as f:
-                f.write(body)
-            written += 1
+            else:
+                written += 1
 
         if failed and not (written or skipped):
             log.error("Every file failed to decrypt; the key is probably wrong for these assets.")
@@ -301,6 +335,7 @@ def extract_offline(
             return written + copied
         log.log(SUCCESS, "Done: %d file(s) decrypted to %s, %d skipped (already dumped live).",
                 written, out_dir, skipped)
+        report.log()
         if failed:
             log.warning("%d file(s) failed to decrypt (run with -v to list them).", failed)
         return written + copied

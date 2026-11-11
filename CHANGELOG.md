@@ -17,10 +17,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Static key search: `main.lua` is an extra Tier 1 anchor.
 - Frida: hooks `LuaStack::setXXTEAKeyAndSign` for the key (and logs the
   signature), and `luaL_loadbufferx` / `luaL_loadbuffer` for live Lua dumps.
+- Compiled Lua chunks are identified from their header — PUC Lua 5.1–5.4 vs
+  LuaJIT 2.0/2.1, with bitness, endianness and whether debug info was stripped
+  — and a run reports the flavours it wrote along with the decompiler that
+  opens them (`unluac` or `luajit-decompiler-v2`).
 
 ### Changed
 - When no key works, the untouched scripts go to `raw_scripts/` instead of
   `raw_jsc/`, and log messages say "script(s)" instead of ".jsc".
+- Frida agent: each symbol table is read once per library instead of up to
+  nine times, all of it inside the linker's `dlopen` on the game's main
+  thread. The `evalString` and `luaL_loadbuffer` hooks are now resolved
+  independently, so a Lua library whose `evalString` offset was pre-resolved
+  by radare2 no longer loses its Lua dump hook. Repeated loads of the same
+  chunk are dropped in the agent rather than re-sent over USB, and a changed
+  body at the same path still gets through.
+- Frida agent: nothing throws out of a hook or out of installation any more.
+  A stripped linker falls back to `android_dlopen_ext` / `dlopen` and then to
+  polling, instead of aborting the agent (which previously also skipped the
+  already-loaded-library scan); a library whose JNI bridge symbol is missing
+  is still matched by name when hooks actually attach.
+- "Saved N live script dump(s)" counts distinct files, not writes.
+- The three offline write loops share one `write_output` helper, which also
+  reports a failed write instead of letting it abort the run.
 
 ## [1.1.0] - 2026-10-28
 

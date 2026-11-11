@@ -9,12 +9,104 @@ from __future__ import annotations
 
 import struct
 import zlib
+from typing import NamedTuple
 
 from .log import log
 
 ZIP_MAGIC = b"PK\x03\x04"
 SPIDERMONKEY_MAGICS = (b"\x2c\xc0\x73\xb9", b"\x1c\xc0\x73\xb9", b"\x2b\xc0\x73\xb9")
-LUA_MAGICS = (b"\x1bLua", b"\x1bLJ")  # compiled chunks: PUC Lua (luac) and LuaJIT
+PUC_LUA_MAGIC = b"\x1bLua"  # compiled chunk from luac (PUC Lua)
+LUAJIT_MAGIC = b"\x1bLJ"    # compiled chunk from luajit -b
+LUA_MAGICS = (PUC_LUA_MAGIC, LUAJIT_MAGIC)
+
+# The two Lua toolchains are disjoint, and so are their decompilers, so the flavour is worth
+# reporting: a .luac on its own gives no hint of what opens it.
+UNLUAC = "unluac"                           # PUC Lua 5.0-5.4
+LUAJIT_DECOMPILER = "luajit-decompiler-v2"  # LuaJIT 2.0 / 2.1
+
+_PUC_VERSIONS = {0x51: "5.1", 0x52: "5.2", 0x53: "5.3", 0x54: "5.4"}
+_LUAJIT_VERSIONS = {1: "2.0", 2: "2.1"}
+
+# luajit/src/lj_bcdump.h
+_LJ_FLAG_BE = 0x01      # big-endian
+_LJ_FLAG_STRIP = 0x02   # debug info stripped
+_LJ_FLAG_FFI = 0x04     # uses the FFI library
+_LJ_FLAG_FR2 = 0x08     # two-slot frame info, i.e. a GC64 (64-bit) build; LuaJIT 2.1 only
+
+
+class LuaBytecode(NamedTuple):
+    label: str  # e.g. 'LuaJIT 2.1 bytecode (64-bit, stripped)'
+    tool: str   # decompiler that handles it
+
+
+def _read_uleb128(data: bytes, pos: int) -> int | None:
+    """Reads a ULEB128 at pos, as LuaJIT's bcdump writes its header fields."""
+    result = shift = 0
+    for _ in range(5):  # a 32-bit value needs at most 5 bytes
+        if pos >= len(data):
+            return None
+        byte = data[pos]
+        result |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return result
+        shift += 7
+        pos += 1
+    return None
+
+
+def _labelled(name: str, notes: list[str]) -> str:
+    return f"{name} ({', '.join(notes)})" if notes else name
+
+
+def _describe_luajit(data: bytes) -> LuaBytecode:
+    """LuaJIT bcdump header: ESC 'L' 'J', version byte, then ULEB128 flags."""
+    if len(data) < 4:
+        return LuaBytecode("LuaJIT bytecode (truncated header)", LUAJIT_DECOMPILER)
+    known = data[3] in _LUAJIT_VERSIONS
+    name = (f"LuaJIT {_LUAJIT_VERSIONS[data[3]]} bytecode" if known
+            else f"LuaJIT bytecode (dump version {data[3]})")
+    flags = _read_uleb128(data, 4)
+    notes = []
+    if flags is not None:
+        # FR2 only exists from 2.1: on 2.0 its absence says nothing about bitness, and on an
+        # unknown dump version the flag layout itself can't be assumed.
+        if known and data[3] >= 2:
+            notes.append("64-bit (GC64)" if flags & _LJ_FLAG_FR2 else "32-bit")
+        if flags & _LJ_FLAG_STRIP:
+            notes.append("stripped")
+        if flags & _LJ_FLAG_BE:
+            notes.append("big-endian")
+        if flags & _LJ_FLAG_FFI:
+            notes.append("FFI")
+    return LuaBytecode(_labelled(name, notes), LUAJIT_DECOMPILER)
+
+
+def _describe_puc_lua(data: bytes) -> LuaBytecode:
+    """PUC Lua header: ESC 'L' 'u' 'a', version byte, format byte, then size fields whose layout
+    changed between releases (5.3 inserted LUAC_DATA; 5.4 dropped size_t entirely)."""
+    if len(data) < 5:
+        return LuaBytecode("PUC Lua bytecode (truncated header)", UNLUAC)
+    version_byte = data[4]
+    name = (f"PUC Lua {_PUC_VERSIONS[version_byte]} bytecode" if version_byte in _PUC_VERSIONS
+            else f"PUC Lua bytecode (version byte {version_byte:#04x})")
+    notes = []
+    size_t_at = {0x51: 8, 0x52: 8, 0x53: 13}.get(version_byte)  # 5.4 has no size_t in the header
+    if version_byte in (0x51, 0x52) and len(data) > 6 and data[6] == 0:
+        notes.append("big-endian")
+    if size_t_at is not None and len(data) > size_t_at and data[size_t_at] in (4, 8):
+        notes.append(f"{data[size_t_at] * 8}-bit")
+    # Whether debug info was stripped isn't in the PUC header; it is per-function.
+    return LuaBytecode(_labelled(name, notes), UNLUAC)
+
+
+def describe_lua_bytecode(data: bytes) -> LuaBytecode | None:
+    """Identifies a compiled Lua chunk and the decompiler for it, or None if it isn't bytecode."""
+    if data.startswith(LUAJIT_MAGIC):
+        return _describe_luajit(data)
+    if data.startswith(PUC_LUA_MAGIC):
+        return _describe_puc_lua(data)
+    return None
+
 
 _DELTA = 0x9E3779B9
 _MASK = 0xFFFFFFFF
