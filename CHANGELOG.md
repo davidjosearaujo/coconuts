@@ -21,7 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   LuaJIT 2.0/2.1, with bitness, endianness and whether debug info was stripped
   — and a run reports the flavours it wrote along with the decompiler that
   opens them (`unluac` or `luajit-decompiler-v2`).
-
+- `--decompile`: after the dump, run a Lua decompiler over every compiled
+  chunk in the output and write `<name>.dec.lua` beside it, keeping the
+  `.luac`. Each chunk is routed by its own header, so a game mixing PUC Lua
+  and LuaJIT chunks works. unluac and luajit-decompiler-v2 aren't on PyPI and
+  aren't bundled: point at them with `--unluac` / `--ljd` or `$UNLUAC_JAR` /
+  `$LUAJIT_DECOMPILER`. A missing one is reported and the other still runs.
+  With no `PACKAGE` and no `--apk`, `--decompile` works over an existing
+  output folder instead of dumping.
 - A pytest suite in `tests/`: ciphers, compiled-Lua identification and the
   offline extraction paths run against synthetic assets, and the Frida agent
   is rendered through `build_frida_script()` and driven against a stubbed

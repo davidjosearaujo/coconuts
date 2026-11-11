@@ -55,8 +55,10 @@ without knowing in advance how that particular build protects its scripts.
 
 Non-goals:
 
-- **Decompiling.** Compiled SpiderMonkey bytecode is written out as-is (`.mozjs.jsc`), and so are
-  compiled Lua chunks (`.luac`). Minified JS can be reformatted with `--pretty`, but not de-obfuscated.
+- **Decompiling, itself.** Compiled SpiderMonkey bytecode is written out as-is (`.mozjs.jsc`), and
+  so are compiled Lua chunks (`.luac`). Minified JS can be reformatted with `--pretty`, but not
+  de-obfuscated. `--decompile` drives an external Lua decompiler over the output and routes each
+  chunk to the right one; coconuts doesn't decompile anything on its own.
 - **iOS or HTML5 builds.** coconuts handles Android builds, with the JavaScript engine (`.jsc` scripts)
   or the Lua engine (`.luac`; see [Lua games](#lua-games)).
 - **Bypassing anti-tamper.** If a game detects Frida or root and exits, the dynamic track fails. The
@@ -177,8 +179,19 @@ differences:
   is logged too), and `luaL_loadbufferx` / `luaL_loadbuffer` for live dumps of every chunk the game
   loads. Chunks loaded from a zip bundle are named after their module (`app.MyApp.lua`).
 - **Bytecode.** Many Lua games ship compiled bytecode rather than source. It's decrypted and written
-  as `.luac` for a decompiler such as [unluac](https://sourceforge.net/projects/unluac/) (PUC Lua) or
-  [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2) (LuaJIT).
+  as `.luac`, and the run reports what it found: PUC Lua 5.1-5.4 or LuaJIT 2.0/2.1, with bitness,
+  endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android
+  and emits separate 32-bit and 64-bit (GC64) bytecode, so one APK can ship two incompatible
+  variants of the same script.
+- **Decompiling.** `--decompile` runs [unluac](https://sourceforge.net/projects/unluac/) (PUC Lua) or
+  [luajit-decompiler-v2](https://github.com/marsinator358/luajit-decompiler-v2) (LuaJIT) over the
+  output, picking per chunk from its header, and writes `<name>.dec.lua` beside the bytecode.
+  Neither decompiler is on PyPI, so neither can be installed with coconuts: point at them with
+  `--unluac` / `--ljd`, or `$UNLUAC_JAR` / `$LUAJIT_DECOMPILER`. Missing ones are reported, and the
+  other flavour still runs. Two things to expect: stripped debug info is normal here, so control
+  flow recovers but local names don't; and a game shipping a patched LuaJIT opcode table yields
+  plausible-looking nonsense with a zero exit code, which nothing can detect for you. The `.luac` is
+  always kept.
 
 Lua support has only been tested with synthetic files so far, not against a real Lua game; the Frida
 hooks in particular are untested. Script bundles shipped as one encrypted zip (loaded with
@@ -450,6 +463,9 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--apk PATH` | — | A local APK/zip or a directory to read assets from, instead of pulling from the device. Repeatable. Zip files are read from their `assets/` folder. For directories, a leading `assets/` is stripped from paths. |
 | `--all-splits` | off | Also pull `split_config.*.apk`. Language, density and ABI splits are skipped by default because they never contain scripts. |
 | `--pretty` | off | After the dump, reformat every `.js` file in the output folder in place with [jsbeautifier](https://github.com/beautifier/js-beautify), so minified one-line bundles become readable. Prints one progress line per file. Large bundles are slow (a 4 MB one-liner takes about half a minute). |
+| `--decompile` | off | After the dump, decompile every compiled Lua chunk in the output to `<name>.dec.lua`, keeping the `.luac`. Each chunk is routed by its own header: PUC Lua to unluac, LuaJIT to luajit-decompiler-v2. Neither ships with coconuts (see below). With no `PACKAGE` and no `--apk`, decompiles an existing output folder instead of dumping, so a run can be retried after installing a decompiler. |
+| `--unluac PATH` | `$UNLUAC_JAR`, PATH | `unluac.jar`, or a wrapper script, for PUC Lua bytecode. A `.jar` needs a Java runtime. |
+| `--ljd PATH` | `$LUAJIT_DECOMPILER`, PATH | A luajit-decompiler-v2 checkout or its `main.py`, for LuaJIT bytecode. |
 | `-v`, `--verbose` | off | Debug output: per-file decryption failures, radare2 and Frida details, tracebacks. |
 | `--no-color` | off | Disable ANSI colours. You can also set `NO_COLOR` or `TERM=dumb`. Colours are off automatically when stderr isn't a terminal. |
 
@@ -573,10 +589,11 @@ downloads them.
   exit before the key is captured.
 - **XXTEA and XOR modes only process scripts** (`.jsc`, `.luac`, `.lua`). Other assets are only
   handled in AES mode.
-- **SpiderMonkey and Lua bytecode aren't decompiled.**
+- **SpiderMonkey bytecode isn't decompiled.** Lua bytecode can be, with `--decompile` and an
+  external decompiler; coconuts never decompiles anything itself.
 - **Lua support hasn't been tested against a real game yet.** See [Lua games](#lua-games).
 - **With `--pretty`, every `.js` file is reformatted in place**, live dumps included. The minified
-  originals aren't kept.
+  originals aren't kept. `--decompile` is the opposite: it only ever adds `.dec.lua` files.
 
 ## Project layout and development
 
@@ -592,6 +609,7 @@ coconuts/
 ├── frida_hook.js   # the Frida agent injected into the game
 ├── adb.py          # device selection and APK pulling
 ├── pretty.py       # --pretty: jsbeautifier pass over the dumped .js files
+├── decompile.py    # --decompile: routes Lua chunks to an external decompiler
 └── extract.py      # asset collection and offline decryption
 
 tests/

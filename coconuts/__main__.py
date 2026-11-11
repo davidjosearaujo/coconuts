@@ -27,6 +27,7 @@ from .ciphers import (
 from .extract import collect_script_entries, extract_offline, split_plain_scripts
 from .frida_dump import FileWriter, build_frida_script, resolve_frida_targets, run_frida_race
 from .log import SUCCESS, ConsoleFormatter, flog, log, slog, use_color
+from .decompile import decompile_dir
 from .pretty import prettify_dir
 from .statickeys import _key_decrypts, _key_samples, recover_key_static, recover_xor_key_kp
 
@@ -98,6 +99,16 @@ def parse_args(argv=None):
                    help="pull all split_config.*.apk files instead of only base/feature APKs")
     p.add_argument("--pretty", action="store_true",
                    help="reformat the dumped .js files in place with jsbeautifier (minified one-liners become readable)")
+    p.add_argument("--decompile", action="store_true",
+                   help="decompile the dumped Lua bytecode to <name>.dec.lua, keeping the .luac. Needs "
+                        "unluac and/or luajit-decompiler-v2 (see --unluac / --ljd); each chunk is routed "
+                        "by its own header. With no PACKAGE and no --apk, decompiles an existing OUTPUT "
+                        "dir instead of dumping.")
+    p.add_argument("--unluac", metavar="PATH",
+                   help="unluac.jar (or a wrapper) for PUC Lua bytecode; also read from $UNLUAC_JAR")
+    p.add_argument("--ljd", metavar="PATH",
+                   help="luajit-decompiler-v2 checkout or main.py for LuaJIT bytecode; also read from "
+                        "$LUAJIT_DECOMPILER")
     p.add_argument("-v", "--verbose", action="store_true", help="show debug messages")
     p.add_argument("--no-color", action="store_true", help="disable coloured output (also honours $NO_COLOR)")
     args = p.parse_args(argv)
@@ -115,6 +126,8 @@ def _finish(args) -> int:
     """Runs the post-dump steps once the output folder is complete."""
     if args.pretty:
         prettify_dir(args.output)
+    if args.decompile:
+        decompile_dir(args.output, unluac=args.unluac, ljd=args.ljd)
     return 0
 
 
@@ -123,6 +136,16 @@ def main(argv=None) -> int:
     handler = logging.StreamHandler()
     handler.setFormatter(ConsoleFormatter(color=use_color(args.no_color)))
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO, handlers=[handler])
+
+    # --decompile with nothing to dump (no PACKAGE, no --apk) is a pass over an existing output
+    # folder, so a failed decompile can be retried without pulling and decrypting everything again.
+    if args.decompile and not args.apk and not args.package:
+        if not os.path.isdir(args.output):
+            log.error("%s doesn't exist; pass the folder a previous run wrote with -o.", args.output)
+            return 1
+        decompile_dir(args.output, unluac=args.unluac, ljd=args.ljd)
+        return 0
+
     if _xxtea_c is None:
         log.warning("Fast XXTEA unavailable; using the ~150x slower pure-Python version. "
                     "To fix: pip uninstall xxtea-py; pip install xxtea")

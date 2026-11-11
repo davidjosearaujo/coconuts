@@ -41,15 +41,11 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   `resolve_frida_targets` only matches `ScriptEngine`/`ScriptingCore` `evalString` for `dump_off`,
   never `luaL_loadbufferx`. Not urgent — the agent resolves the Lua loader itself from the export and
   symbol tables — but a stripped lib needs the offset precomputed, like the JS path already does.
-- [ ] **Bytecode decompilation (optional).** Decrypted `.luac` bytecode is written as-is. The flavour
-  is now detected and reported (`describe_lua_bytecode` in `ciphers.py`), so what's left is an
-  optional step that shells out to unluac (PUC Lua) or luajit-decompiler-v2 (LuaJIT) when installed.
-  Expect LuaJIT in practice: `cocos luacompile` goes through it on Android, and emits separate
-  32-bit and 64-bit (GC64) bytecode, so one APK can ship two incompatible variants of a script.
-  Two known failure modes to handle rather than crash on: stripped debug info (normal here — control
-  flow still recovers, names don't), and a LuaJIT with a patched opcode table, which some games ship
-  precisely to break stock decompilers and which can only be fixed by recovering the table from the
-  game's own `libcocos2dlua.so`.
+- [x] **Bytecode decompilation (optional).** `--decompile` routes each chunk to unluac or
+  luajit-decompiler-v2 by its header and writes `<name>.dec.lua` beside the bytecode. Still open:
+  the luajit-decompiler-v2 command line was written against its documented behaviour, not run
+  against the real tool -- the pass accepts either stdout or a `<stem>.lua` it writes itself, so
+  check which it does and whether a flag is needed for the output location.
 - [ ] **XOR known-plaintext attack for Lua.** It only knows JS headers. Add Lua plaintexts if a Lua
   engine with XOR encryption turns up.
 
@@ -60,4 +56,5 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
   the Frida agent driven against a stubbed Frida runtime under Node.
 - [ ] **Tests for what isn't covered yet.** `statickeys.py` (the tiered search and the XOR
   known-plaintext attack), `aes.py` / the EncryptManager path, `manifest.py` (engine-library pick,
-  ABI ranking), and `adb.py`. `r2.py` needs radare2, so it probably stays manual.
+  ABI ranking), and `adb.py`. `r2.py` needs radare2, so it probably stays manual. `decompile.py` is
+  covered with stand-in decompilers, never the real ones.
