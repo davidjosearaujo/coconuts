@@ -173,8 +173,13 @@ differences:
   file that starts with the signature. Scripts shipped unencrypted (plain source, or bytecode starting
   with `\x1bLua` / `\x1bLJ`) are copied as-is and don't need a key.
 - **Engine library.** `libcocos2dlua.so`, also tried by default when the library is read from the APK.
-- **Static track.** The same tiers, with `main.lua` as an extra anchor. The Tier 0 radare2 pass reads
-  the literals in `applicationDidFinishLaunching`, where Lua games pass their key.
+- **Static track.** Lua games pass their key *and* its signature together to
+  `LuaStack::setXXTEAKeyAndSign` from `applicationDidFinishLaunching`, and that call compiles to a
+  recognisable arm64 shape, so both are read straight out of the instructions -- the same thing you
+  would do by hand in Ghidra, and without needing radare2. The match is on the argument shape (two
+  string pointers whose lengths are passed beside them) rather than on the vtable offset, which
+  varies by Cocos version, and the pair is still trial-decrypted before it is used. When that
+  doesn't fire, the string tiers run as before, with `main.lua` as an extra anchor.
 - **Frida track.** Hooks `xxtea_decrypt` and `LuaStack::setXXTEAKeyAndSign` for the key (the signature
   is logged too), and `luaL_loadbufferx` / `luaL_loadbuffer` for live dumps of every chunk the game
   loads. Chunks loaded from a zip bundle are named after their module (`app.MyApp.lua`).
@@ -616,17 +621,20 @@ coconuts/
 ├── adb.py          # device selection and APK pulling
 ├── pretty.py       # --pretty: jsbeautifier pass over the dumped .js files
 ├── decompile.py    # --decompile: routes Lua chunks to an external decompiler
+├── arm64.py        # reads the key + signature from the setXXTEAKeyAndSign call site
 └── extract.py      # asset collection and offline decryption
 
 tests/
 ├── conftest.py            # synthetic assets: encrypted/plain Lua, an APK-shaped zip
 ├── test_ciphers.py        # XXTEA round-trip, signature detection, bytecode identification
 ├── test_extract.py        # output paths, path-traversal refusal, end-to-end decryption
+├── test_arm64.py          # key/signature recovery, on assembled arm64 libraries
 ├── test_decompile.py      # --decompile, driven with stand-in decompilers
 ├── test_real_bytecode.py  # the header parser against real bytecode from every Lua runtime
 ├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
 ├── frida_agent_test.js    # the agent's behaviour tests
 ├── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
+├── fixtures/mkelf.py      # assembles aarch64 .so fixtures (no cross-linker needed)
 └── fixtures/bytecode/     # compiled chunks from PUC Lua 5.1-5.5 and LuaJIT 2.0/2.1
 ```
 

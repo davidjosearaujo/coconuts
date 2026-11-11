@@ -23,7 +23,12 @@ from .ciphers import (
     xor_decrypt,
 )
 from .log import SUCCESS, log
-from .statickeys import _key_samples, recover_key_static, recover_xor_key_kp
+from .statickeys import (
+    _key_samples,
+    recover_key_and_sign_static,
+    recover_key_static,
+    recover_xor_key_kp,
+)
 
 
 def safe_join(base: str, rel: str) -> str:
@@ -290,7 +295,21 @@ def extract_offline(
             return copied
 
         xor_key: bytes | None = None
-        sign = forced_sign if forced_sign is not None else detect_signature_prefix(list(entries.values()))
+
+        # The engine passes its key and signature together to setXXTEAKeyAndSign, so when both can
+        # be read from the library there is no need to guess the signature from a common prefix.
+        exact_sign: bytes | None = None
+        if key is None and lib_path:
+            exact = recover_key_and_sign_static(lib_path, entries)
+            if exact is not None:
+                key, exact_sign = exact
+
+        if forced_sign is not None:
+            sign = forced_sign
+        elif exact_sign is not None:
+            sign = exact_sign
+        else:
+            sign = detect_signature_prefix(list(entries.values()))
         if sign:
             log.info("Detected %d-byte script signature prefix: %r (hex: %s)", len(sign), sign, sign.hex())
 

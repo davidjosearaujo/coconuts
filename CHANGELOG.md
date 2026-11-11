@@ -33,6 +33,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build on Linux (`--ljd` runs an `.exe` through Wine).
 - Compiled Lua 5.5 chunks are identified (lupa ships a 5.5 runtime, so real
   5.5 bytecode exists in the wild to test against).
+- The XXTEA key and its signature are read directly from the engine library's
+  `LuaStack::setXXTEAKeyAndSign` call site, by decoding the arm64 instructions
+  that set up its arguments -- what you would otherwise do by hand in Ghidra.
+  This is what the string tiers could never do: they collect every literal in
+  `applicationDidFinishLaunching` and trial-decrypt them, so they can find the
+  key but never learn which literal was the signature. Needs no radare2, and
+  matches on the argument shape rather than the vtable offset, which varies by
+  Cocos version. The pair is still verified by trial decryption, so a wrong
+  match just falls back to the string tiers.
 - A pytest suite in `tests/`: ciphers, compiled-Lua identification and the
   offline extraction paths run against synthetic assets, and the Frida agent
   is rendered through `build_frida_script()` and driven against a stubbed

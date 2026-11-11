@@ -20,6 +20,7 @@ from .ciphers import (
     unpack_payload,
     xor_decrypt,
 )
+from .arm64 import find_key_and_sign
 from .log import SUCCESS, slog
 from .r2 import _r2_abort_guard
 
@@ -148,7 +149,13 @@ def find_possible_keys(
         if s and s not in _KEY_EXCLUDE and s.isprintable():
             found.setdefault(s, None)
 
-    # Tier 0: Exact string pointers from AppDelegate::applicationDidFinishLaunching via r2
+    # Tier 0a: the exact arguments of the setXXTEAKeyAndSign call, read from the instructions.
+    # No radare2 needed, and unlike the string tiers this knows which literal is the key.
+    for pair in find_key_and_sign(lib_path):
+        with contextlib.suppress(UnicodeDecodeError):
+            found.setdefault(pair.key.decode("ascii"), None)
+
+    # Tier 0b: Exact string pointers from AppDelegate::applicationDidFinishLaunching via r2
     for s in extract_r2_priority_keys(lib_path, abort_event=abort_event):
         found.setdefault(s, None)
     tier0_count = len(found)
@@ -222,6 +229,32 @@ def _key_decrypts(data: bytes, key: bytes, sign: bytes = b"") -> bool:
         return False
     body, kind = unpack_payload(plain)
     return looks_like_script(body, kind)
+
+
+def recover_key_and_sign_static(
+    lib_path: str,
+    entries: dict[str, bytes],
+) -> tuple[bytes, bytes] | None:
+    """Reads the key and its signature from the setXXTEAKeyAndSign call site, both verified.
+
+    This is the precise counterpart to the string tiers: instead of collecting every literal in
+    applicationDidFinishLaunching and trial-decrypting them, it reads the two arguments the engine
+    actually passes, so the signature is known rather than guessed from a common prefix.
+    """
+    if not entries or not lib_path:
+        return None
+    pairs = find_key_and_sign(lib_path)
+    if not pairs:
+        return None
+    samples = _key_samples(entries)
+    for pair in pairs:
+        key = normalize_key(pair.key)
+        if all(_key_decrypts(s, key, sign=pair.sign) for s in samples):
+            slog.log(SUCCESS, "Key and signature read from the engine library (%s): %s, "
+                              "signature %r", pair.where, describe_key(key), pair.sign)
+            return key, pair.sign
+    slog.debug("arm64 scan found %d pair(s), none of which decrypt the scripts.", len(pairs))
+    return None
 
 
 def recover_key_static(
