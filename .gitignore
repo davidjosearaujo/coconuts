@@ -20,3 +20,5 @@ dumped_cocos_assets/
 
 # Tests
 .pytest_cache/
+# Intermediate objects from rebuilding the Android fixtures (the .so files are committed)
+tests/fixtures/android/*/obj/
