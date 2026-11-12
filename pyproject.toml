@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "coconuts"
-version = "2.0.1"
+version = "2.1.0"
 description = "Dump and decrypt Cocos2d-x / Cocos Creator scripts and assets from an Android app."
 readme = "README.md"
 requires-python = ">=3.9"
