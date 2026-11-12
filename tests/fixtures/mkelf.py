@@ -34,12 +34,96 @@ def blr(rn: int) -> int:
     return 0xD63F0000 | (rn << 5)
 
 
+def bl(pc: int, target: int) -> int:
+    return 0x94000000 | (((target - pc) >> 2) & 0x3FFFFFF)
+
+
+def br(rn: int) -> int:
+    return 0xD61F0000 | (rn << 5)
+
+
+# The standard aarch64 frame prologue and epilogue. radare2's prelude scan (`aap`) looks for
+# these, and without them it never works out where functions begin -- real compiled code has them,
+# so the fixtures do too.
+STP_FP_LR = 0xA9BF7BFD   # stp x29, x30, [sp, #-16]!
+LDP_FP_LR = 0xA8C17BFD   # ldp x29, x30, [sp], #16
+
+
 def ret() -> int:
     return 0xD65F03C0
 
 
 def nop() -> int:
     return 0xD503201F
+
+
+def _assemble(text: bytes, rodata: bytes, syms: dict[str, int],
+              text_vaddr: int, rodata_vaddr: int) -> bytes:
+    """Wraps .text and .rodata in an ET_DYN aarch64 ELF with a symbol table.
+
+    Virtual addresses are kept equal to file offsets, so the single PT_LOAD maps one to one:
+    tools that map by program header (radare2 among them) would otherwise read the wrong bytes,
+    while anything reading section headers would not notice.
+    """
+    strtab = bytearray(b"\0")
+    sym_entries = [b"\0" * 24]  # STN_UNDEF
+    for name, value in syms.items():
+        name_off = len(strtab)
+        strtab += name.encode() + b"\0"
+        # st_name, st_info(GLOBAL|FUNC), st_other, st_shndx(.text=1), st_value, st_size
+        size = len(text) if value == text_vaddr else 4
+        sym_entries.append(struct.pack("<IBBHQQ", name_off, (1 << 4) | 2, 0, 1, value, size))
+    symtab = b"".join(sym_entries)
+
+    shstrtab = bytearray(b"\0")
+    sh_names = {}
+    for name in (".text", ".rodata", ".symtab", ".strtab", ".shstrtab"):
+        sh_names[name] = len(shstrtab)
+        shstrtab += name.encode() + b"\0"
+
+    ehsize, phentsize, shentsize = 64, 56, 64
+    phoff = ehsize
+    phnum = 1
+    # vaddr == BASE + file offset throughout, so the single PT_LOAD maps one to one.
+    file_text = text_vaddr - BASE
+    file_rodata = rodata_vaddr - BASE
+    file_symtab = file_rodata + len(rodata)
+    file_strtab = file_symtab + len(symtab)
+    file_shstr = file_strtab + len(strtab)
+    file_sh = (file_shstr + len(shstrtab) + 0xF) & ~0xF
+
+    out = bytearray(file_sh + 6 * shentsize)
+    out[0:16] = b"\x7fELF\x02\x01\x01\x00" + b"\0" * 8
+    struct.pack_into("<HHIQQQIHHHHHH", out, 16,
+                     3,            # e_type = ET_DYN
+                     EM_AARCH64, 1,
+                     text_vaddr,   # e_entry
+                     phoff, file_sh, 0,
+                     ehsize, phentsize, phnum, shentsize, 6, 5)
+
+    load_size = file_shstr + len(shstrtab)
+    struct.pack_into("<IIQQQQQQ", out, phoff,
+                     1, 5,         # PT_LOAD, R+X
+                     0, BASE, BASE, load_size, load_size, 0x1000)
+
+    out[file_text:file_text + len(text)] = text
+    out[file_rodata:file_rodata + len(rodata)] = rodata
+    out[file_symtab:file_symtab + len(symtab)] = symtab
+    out[file_strtab:file_strtab + len(strtab)] = strtab
+    out[file_shstr:file_shstr + len(shstrtab)] = shstrtab
+
+    def section(i, name, stype, flags, addr, off, size, link=0, info=0, align=1, entsize=0):
+        struct.pack_into("<IIQQQQIIQQ", out, file_sh + i * shentsize,
+                         sh_names[name], stype, flags, addr, off, size, link, info, align, entsize)
+
+    section(0, ".text", 0, 0, 0, 0, 0)  # index 0 must be SHT_NULL; overwritten below
+    struct.pack_into("<IIQQQQIIQQ", out, file_sh, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    section(1, ".text", 1, 0x6, text_vaddr, file_text, len(text), align=4)       # ALLOC|EXEC
+    section(2, ".rodata", 1, 0x2, rodata_vaddr, file_rodata, len(rodata), align=1)
+    section(3, ".symtab", 2, 0, 0, file_symtab, len(symtab), link=4, info=1, align=8, entsize=24)
+    section(4, ".strtab", 3, 0, 0, file_strtab, len(strtab), align=1)
+    section(5, ".shstrtab", 3, 0, 0, file_shstr, len(shstrtab), align=1)
+    return bytes(out)
 
 
 # --- ELF assembly -----------------------------------------------------------------------------
@@ -123,66 +207,124 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
     for i, stub in enumerate(stub_symbols):
         syms[stub] = text_vaddr + (main_insns + i) * 4
 
-    # .strtab / .symtab
-    strtab = bytearray(b"\0")
-    sym_entries = [b"\0" * 24]  # STN_UNDEF
-    for name, value in syms.items():
-        name_off = len(strtab)
-        strtab += name.encode() + b"\0"
-        # st_name, st_info(GLOBAL|FUNC), st_other, st_shndx(.text=1), st_value, st_size
-        size = len(text) if value == text_vaddr else 4
-        sym_entries.append(struct.pack("<IBBHQQ", name_off, (1 << 4) | 2, 0, 1, value, size))
-    symtab = b"".join(sym_entries)
+    return _assemble(text, rodata, syms, text_vaddr, rodata_vaddr)
 
-    shstrtab = bytearray(b"\0")
-    sh_names = {}
-    for name in (".text", ".rodata", ".symtab", ".strtab", ".shstrtab"):
-        sh_names[name] = len(shstrtab)
-        shstrtab += name.encode() + b"\0"
 
-    ehsize, phentsize, shentsize = 64, 56, 64
-    phoff = ehsize
-    phnum = 1
-    # vaddr == BASE + file offset throughout, so the single PT_LOAD maps one to one.
-    file_text = text_off
-    file_rodata = rodata_off
-    file_symtab = file_rodata + len(rodata)
-    file_strtab = file_symtab + len(symtab)
-    file_shstr = file_strtab + len(strtab)
-    file_sh = (file_shstr + len(shstrtab) + 0xF) & ~0xF
+# --- the "can\'t decrypt code" shape -----------------------------------------------------------
+#
+# find_key_function() works in two steps: find the function that references the decrypt-failure
+# string, then pick the call to xxtea_decrypt out of the `bl`s inside it (the KEY_CALL_INDEX-th,
+# with a fallback to whichever callee has exactly two xrefs). Assembling the shape by hand is what
+# makes the call order and the xref counts exact; a compiler would decide both for us.
 
-    out = bytearray(file_sh + 6 * shentsize)
-    out[0:16] = b"\x7fELF\x02\x01\x01\x00" + b"\0" * 8
-    struct.pack_into("<HHIQQQIHHHHHH", out, 16,
-                     3,            # e_type = ET_DYN
-                     EM_AARCH64, 1,
-                     text_vaddr,   # e_entry
-                     phoff, file_sh, 0,
-                     ehsize, phentsize, phnum, shentsize, 6, 5)
+JNI_BRIDGE = "Java_org_cocos2dx_lib_Cocos2dxJavascriptJavaBridge_evalString"
 
-    load_size = file_shstr + len(shstrtab)
-    struct.pack_into("<IIQQQQQQ", out, phoff,
-                     1, 5,         # PT_LOAD, R+X
-                     0, BASE, BASE, load_size, load_size, 0x1000)
 
-    out[file_text:file_text + len(text)] = text
-    out[file_rodata:file_rodata + len(rodata)] = rodata
-    out[file_symtab:file_symtab + len(symtab)] = symtab
-    out[file_strtab:file_strtab + len(strtab)] = strtab
-    out[file_shstr:file_shstr + len(shstrtab)] = shstrtab
+def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
+                       n_calls: int = 20,
+                       key_call_index: int = 12,
+                       extra_callers: dict[int, int] | None = None,
+                       key_via_plt: bool = False,
+                       with_key_symbol: bool = True,
+                       decoy_strings: tuple[bytes, ...] = ()) -> tuple[bytes, dict]:
+    """A library whose decrypt-failure function calls `n_calls` stubs, one of them the key call.
 
-    def section(i, name, stype, flags, addr, off, size, link=0, info=0, align=1, entsize=0):
-        struct.pack_into("<IIQQQQIIQQ", out, file_sh + i * shentsize,
-                         sh_names[name], stype, flags, addr, off, size, link, info, align, entsize)
+    `extra_callers` maps a call index to how many additional functions also call that callee, so a
+    callee's xref count can be set exactly (the real xxtea_decrypt has two). With `key_via_plt` the
+    key call goes to a stub that jumps through x16, like a PLT entry, and the real xxtea_decrypt
+    symbol sits elsewhere -- unless `with_key_symbol` is false, when there is nothing to resolve.
+    Returns the ELF and the addresses in it.
+    """
+    extra_callers = dict(extra_callers or {})
+    flat_extras = [idx for idx, count in extra_callers.items() for _ in range(count)]
+    # A key_call_index outside the call list means no call is the key call, which is how the
+    # "nothing callable in the decrypt-failure function" case is built.
+    has_key_call = 0 <= key_call_index < n_calls
 
-    section(0, ".text", 0, 0, 0, 0, 0)  # index 0 must be SHT_NULL; overwritten below
-    struct.pack_into("<IIQQQQIIQQ", out, file_sh, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-    section(1, ".text", 1, 0x6, text_vaddr, file_text, len(text), align=4)       # ALLOC|EXEC
-    section(2, ".rodata", 1, 0x2, rodata_vaddr, file_rodata, len(rodata), align=1)
-    section(3, ".symtab", 2, 0, 0, file_symtab, len(symtab), link=4, info=1, align=8, entsize=24)
-    section(4, ".strtab", 3, 0, 0, file_strtab, len(strtab), align=1)
-    section(5, ".shstrtab", 3, 0, 0, file_shstr, len(shstrtab), align=1)
-    return bytes(out)
+    rodata = bytearray()
+    offsets = {}
+    for blob in (*decoy_strings, needle):
+        offsets[bytes(blob)] = len(rodata)
+        rodata += blob + b"\0"
+
+    MAIN_LEN = n_calls + 5        # prologue, adrp, add, the calls, epilogue, ret
+    CALLEE_LEN = 3                # prologue, epilogue, ret
+    CALLER_LEN = 4                # prologue, bl, epilogue, ret
+    PLT_LEN = 3                   # adrp x16, ldr x16, br x16 -- a PLT entry has no frame
+
+    n_insn = (MAIN_LEN + n_calls * CALLEE_LEN + len(flat_extras) * CALLER_LEN
+              + (PLT_LEN + CALLEE_LEN if key_via_plt else 0))
+    text_off = TEXT_OFF
+    rodata_off = (text_off + n_insn * 4 + 0xF) & ~0xF
+    text_vaddr, rodata_vaddr = BASE + text_off, BASE + rodata_off
+    needle_at = rodata_vaddr + offsets[bytes(needle)]
+
+    # Addresses first, so the calls can be emitted with their targets resolved.
+    at = text_vaddr + MAIN_LEN * 4
+    callee_at = []
+    for _ in range(n_calls):
+        callee_at.append(at)
+        at += CALLEE_LEN * 4
+    caller_at = []
+    for _ in flat_extras:
+        caller_at.append(at)
+        at += CALLER_LEN * 4
+    plt_at = at if key_via_plt else 0
+    if key_via_plt:
+        real_key_at = plt_at + PLT_LEN * 4
+    else:
+        real_key_at = callee_at[key_call_index] if has_key_call else 0
+    key_target = plt_at if key_via_plt else real_key_at
+
+    words: list[int] = []
+    pc = text_vaddr
+
+    def put(word):
+        nonlocal pc
+        words.append(word)
+        pc += 4
+
+    # The decrypt-failure function: it references the string, then makes its calls.
+    put(STP_FP_LR)
+    put(adrp(0, pc, needle_at))
+    put(add_imm(0, 0, needle_at & 0xFFF))
+    for i in range(n_calls):
+        put(bl(pc, key_target if i == key_call_index and key_target else callee_at[i]))
+    put(LDP_FP_LR)
+    put(ret())
+
+    for _ in range(n_calls):                     # the callees
+        put(STP_FP_LR)
+        put(LDP_FP_LR)
+        put(ret())
+    for idx in flat_extras:                      # extra callers, to set xref counts
+        put(STP_FP_LR)
+        put(bl(pc, key_target if idx == key_call_index else callee_at[idx]))
+        put(LDP_FP_LR)
+        put(ret())
+    if key_via_plt:
+        put(adrp(16, pc, real_key_at))           # the hop through x16 is what marks a PLT stub
+        put(ldr_x(16, 16, 0))
+        put(br(16))
+        put(STP_FP_LR)                           # the real xxtea_decrypt behind it
+        put(LDP_FP_LR)
+        put(ret())
+
+    assert len(words) == n_insn, (len(words), n_insn)
+    text = b"".join(struct.pack("<I", w) for w in words)
+
+    syms = {"_ZN12ScriptingCore9runScriptEPKc": text_vaddr, JNI_BRIDGE: text_vaddr}
+    for i, addr in enumerate(callee_at):
+        if i != key_call_index:
+            syms[f"stub_{i}"] = addr
+    if with_key_symbol and real_key_at:
+        syms["xxtea_decrypt"] = real_key_at
+    elif not key_via_plt and real_key_at:
+        syms[f"stub_{key_call_index}"] = real_key_at
+
+    layout = {"fail_fn": text_vaddr, "callees": callee_at, "key_target": key_target,
+              "key_real": real_key_at, "needle_at": needle_at, "callers": caller_at}
+    return _assemble(text, bytes(rodata), syms, text_vaddr, rodata_vaddr), layout
 
 
 if __name__ == "__main__":

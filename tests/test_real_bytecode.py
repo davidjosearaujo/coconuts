@@ -23,11 +23,12 @@ BYTECODE = Path(__file__).parent / "fixtures" / "bytecode"
 
 # What each fixture is, as its own compiler wrote it. The PUC 5.1-5.3 files say 64-bit because
 # their header records sizeof(size_t) from the host that generated them; 5.4 and 5.5 dropped it.
+# No lua51_stripped / lua52_stripped: string.dump ignores its strip argument before 5.3, so those
+# would be byte-for-byte copies of the unstripped fixtures. Stripped PUC bytecode is covered by
+# 5.3 upwards.
 EXPECTED = {
     "lua51.luac": ("PUC Lua 5.1 bytecode (64-bit)", UNLUAC),
-    "lua51_stripped.luac": ("PUC Lua 5.1 bytecode (64-bit)", UNLUAC),
     "lua52.luac": ("PUC Lua 5.2 bytecode (64-bit)", UNLUAC),
-    "lua52_stripped.luac": ("PUC Lua 5.2 bytecode (64-bit)", UNLUAC),
     "lua53.luac": ("PUC Lua 5.3 bytecode (64-bit)", UNLUAC),
     "lua53_stripped.luac": ("PUC Lua 5.3 bytecode (64-bit)", UNLUAC),
     "lua54.luac": ("PUC Lua 5.4 bytecode", UNLUAC),

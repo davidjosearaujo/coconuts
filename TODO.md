@@ -44,8 +44,7 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 
 ## General
 
-- [ ] **Tests for what isn't covered yet.** `find_key_function` and `find_string_xref_function`
-  in `r2.py`, which need a library carrying the needle strings and realistic call graphs. For
-  `decompile.py`, the LuaJIT half now runs against the real luajit-decompiler-v2 when
-  `$LUAJIT_DECOMPILER` points at its release `.exe`; the PUC half still needs a built unluac jar
-  in `$UNLUAC_JAR`, and falls back to a stand-in decompiler without one.
+- [ ] **Tests for what isn't covered yet.** `pretty.py` (the jsbeautifier pass), `log.py`, and
+  the command line in `__main__.py` — argument handling, and the static/Frida race it
+  orchestrates — have no tests. The race is the awkward one: it wants a fake Frida track and a
+  fake static track racing under a deterministic clock, not a real device.

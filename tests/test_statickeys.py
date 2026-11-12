@@ -72,7 +72,6 @@ class TestXorKnownPlaintext:
     # must see the key repeat at least twice. LuaJIT's five-byte header only manages one byte.
     @pytest.mark.parametrize("name,key", [
         ("lua51", b"abcde"),
-        ("lua51_stripped", b"abcde"),
         ("lua52", b"abcdefgh"),
         ("lua53", b"abcdefghijklmn"),
         ("lua53_stripped", b"abcdefghijklmn"),

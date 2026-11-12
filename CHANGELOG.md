@@ -34,6 +34,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (the `Mar_24_2024` release `.exe`, run through Wine): all four LuaJIT 2.0 and
   2.1 fixtures, stripped and not, decompile and land where coconuts looks for
   them. Documented in the README.
+- `r2.py`'s two heavy-analysis searches are tested at last: `find_string_xref_function`,
+  against every needle the tool ships, and `find_key_function`, including the
+  index rule, the two-xref tie-breaker, the short-function fallback and PLT
+  resolution through the symbol table. They needed a library with the needle
+  strings and realistic call graphs, which `fixtures/mkelf.py` now assembles —
+  by hand, so the call order and the xref counts are exact rather than
+  whatever a compiler decided. Each assertion was checked against a mutated
+  `r2.py` to confirm it fails when the rule it describes changes.
+- `--decompile` is now verified against both real decompilers: unluac (built
+  from source with a JDK) for PUC Lua and luajit-decompiler-v2 under Wine for
+  LuaJIT. Both reproduce the original source from unstripped bytecode. Set
+  `$UNLUAC_JAR` and `$LUAJIT_DECOMPILER` to run those tests; they skip
+  otherwise.
 - Tests for the previously uncovered `aes.py`, `manifest.py` and `adb.py`, and
   for the string tiers and key search in `statickeys.py`. The builders for the
   two input shapes coconuts accepts (an APK zip, an unpacked directory) are
@@ -41,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The `lua51_stripped` and `lua52_stripped` bytecode fixtures are gone. They
+  were byte-for-byte copies of the unstripped ones: `string.dump` only grew its
+  strip argument in 5.3, and earlier versions ignore the extra parameter rather
+  than failing. The generator now says so instead of writing a duplicate, and
+  stripped PUC bytecode is covered by 5.3 upwards.
 - **Hot-updated Lua scripts land beside their packaged counterparts.** Their
   chunk names are absolute paths in the app's writable directory, which used to
   nest them under the output folder as `data/user/0/<package>/files/...`. That

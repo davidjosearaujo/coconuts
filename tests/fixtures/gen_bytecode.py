@@ -18,6 +18,7 @@ RUNTIMES = ("lua51", "lua52", "lua53", "lua54", "lua55", "luajit20", "luajit21")
 
 def main(out: str) -> int:
     os.makedirs(out, exist_ok=True)
+    unstripped: dict[str, bytes] = {}
     for name in RUNTIMES:
         try:
             mod = __import__("lupa." + name, fromlist=[name])
@@ -33,6 +34,14 @@ def main(out: str) -> int:
             except Exception as e:
                 print(f"{name:10} strip={strip!s:5} dump failed: {e}")
                 continue
+            # string.dump only grew its strip argument in 5.3, and 5.1/5.2 ignore the extra
+            # parameter instead of failing, so asking them to strip returns the same bytes. A
+            # second identical fixture under a "_stripped" name would just be misleading.
+            if strip and blob == unstripped.get(name):
+                print(f"{name:10} strip={strip!s:5} ignored by this runtime; no fixture written")
+                continue
+            if not strip:
+                unstripped[name] = blob
             path = os.path.join(out, f"{name}{'_stripped' if strip else ''}.luac")
             with open(path, "wb") as f:
                 f.write(blob)

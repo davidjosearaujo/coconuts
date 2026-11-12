@@ -655,14 +655,15 @@ tests/
 ├── test_adb.py            # device resolution and APK pulling, against a fake adb
 ├── test_android_fixtures.py  # the real arm64 engine libraries below, and r2.py over them
 ├── test_arm64.py          # key/signature recovery, on assembled arm64 libraries
-├── test_r2.py             # the radare2 paths; skipped when radare2 isn't installed
+├── test_r2.py             # the radare2 paths, incl. the two heavy-analysis searches
 ├── test_statickeys.py     # string tiers, key search, XOR known-plaintext attack
 ├── test_decompile.py      # --decompile, driven with stand-in decompilers
 ├── test_real_bytecode.py  # the header parser against real bytecode from every Lua runtime
 ├── test_frida_agent.py    # renders the agent and runs the JS suite below under Node
 ├── frida_agent_test.js    # the agent's behaviour tests
 ├── fake_frida.js          # Frida stub: flat memory, NativePointer, Interceptor/Process/Module
-├── fixtures/mkelf.py      # assembles aarch64 .so fixtures (no cross-linker needed)
+├── fixtures/mkelf.py      # assembles aarch64 .so fixtures: the key/sign call site, and a
+│                          #   decrypt-failure function with an exact call order and xref counts
 ├── fixtures/bytecode/     # compiled chunks from PUC Lua 5.1-5.5 and LuaJIT 2.0/2.1
 └── fixtures/android/      # real arm64 engine libraries, their harness and a device runner
 ```
@@ -688,9 +689,23 @@ defect in it looks exactly like a missing dependency.
 
 Bytecode identification is checked against `tests/fixtures/bytecode/`, real compiled chunks from
 every PUC Lua and LuaJIT runtime rather than headers written by hand; `tests/fixtures/gen_bytecode.py`
-regenerates them from lupa's bundled interpreters. Setting `$UNLUAC_JAR` or `$LUAJIT_DECOMPILER`
-additionally runs `--decompile` against the real decompilers; without them those tests skip and
-stand-ins cover the plumbing.
+regenerates them from lupa's bundled interpreters. (There is no stripped fixture for 5.1 or 5.2:
+`string.dump` only grew its strip argument in 5.3, and earlier versions ignore it, so such a file
+would be a copy of the unstripped one.)
+
+Setting `$UNLUAC_JAR` or `$LUAJIT_DECOMPILER` additionally runs `--decompile` against the real
+decompilers; without them those tests skip and stand-ins cover the plumbing. Both have been run:
+
+```sh
+# unluac: Java, so it needs a JDK. Its own build.sh does the same two commands.
+git clone --depth 1 https://github.com/HansWessels/unluac && cd unluac
+javac -nowarn -d build -sourcepath src src/unluac/*.java
+jar -cfm bin/unluac.jar src/unluac/Manifest.mf -C build .
+export UNLUAC_JAR=$PWD/bin/unluac.jar
+
+# luajit-decompiler-v2: a Windows binary, run through Wine (see --ljd above)
+export LUAJIT_DECOMPILER=/path/to/luajit-decompiler-v2.exe WINEPREFIX=/tmp/wine-ljd
+```
 
 `tests/fixtures/android/` holds twelve real arm64 `libcocos2dlua.so` builds (Lua 5.1, Lua 5.3 and
 LuaJIT, each in four symbol shapes) with the harness that rebuilds them byte for byte and a script
