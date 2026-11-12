@@ -44,7 +44,9 @@ Open work, mostly for the Lua support added on the `lua-support` branch.
 
 ## General
 
-- [ ] **Tests for what isn't covered yet.** `pretty.py` (the jsbeautifier pass), `log.py`, and
-  the command line in `__main__.py` — argument handling, and the static/Frida race it
-  orchestrates — have no tests. The race is the awkward one: it wants a fake Frida track and a
-  fake static track racing under a deterministic clock, not a real device.
+- [ ] **Tests for what isn't covered yet.** `pretty.py` (the jsbeautifier pass) and `log.py` have
+  none at all. In `__main__.py`, `main()` is driven end to end for the offline cases
+  (`tests/test_decompile.py::TestCli`, including `--apk --key --decompile`), but the static/Frida
+  race is not: it wants a fake Frida track and a fake static track racing under a deterministic
+  clock, so that which track wins, the abort of the loser, and the key verification that follows
+  are all decided by the test rather than by timing.
