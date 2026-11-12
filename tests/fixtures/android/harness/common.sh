@@ -8,8 +8,34 @@
 #   hidden-unstripped   - local symbol, only reachable through enumerateSymbols()
 #   hidden-stripped     - gone entirely: the agent must degrade, not crash
 
-NDK=${NDK:-/home/davidjosearaujo/Android/Sdk/ndk/30.0.16248370}
-TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin
+# The NDK: $NDK or $ANDROID_NDK_HOME when set, else the newest one in the usual SDK locations
+# (the same places coconuts/adb.py looks for the SDK).
+if [ -z "${NDK:-}" ]; then
+    NDK=${ANDROID_NDK_HOME:-}
+fi
+if [ -z "$NDK" ]; then
+    for sdk in "${ANDROID_HOME:-}" "${ANDROID_SDK_ROOT:-}" "$HOME/Android/Sdk" \
+               "$HOME/Library/Android/sdk"; do
+        [ -n "$sdk" ] || continue
+        found=$(ls -d "$sdk"/ndk/*/ 2>/dev/null | sort -V | tail -1)
+        [ -n "$found" ] && { NDK=${found%/}; break; }
+    done
+fi
+if [ ! -d "${NDK:-}" ]; then
+    echo "No Android NDK found: set \$NDK or \$ANDROID_NDK_HOME to one." >&2
+    exit 1
+fi
+
+# The prebuilt toolchain directory is named for the host, not the target.
+case "$(uname -s)" in
+    Darwin) HOST_TAG=darwin-x86_64 ;;
+    *)      HOST_TAG=linux-x86_64 ;;
+esac
+TC=$NDK/toolchains/llvm/prebuilt/$HOST_TAG/bin
+if [ ! -x "$TC/aarch64-linux-android21-clang" ]; then
+    echo "No aarch64 toolchain in $TC (is \$NDK an NDK?)." >&2
+    exit 1
+fi
 CC=$TC/aarch64-linux-android21-clang
 CXX=$TC/aarch64-linux-android21-clang++
 STRIP=$TC/llvm-strip
