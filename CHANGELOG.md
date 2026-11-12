@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `extract_offline` walks its inputs once. Script collection and the
+  signature scan each built their own asset index, so an APK's central
+  directory was parsed twice per run; they share one now, and
+  `collect_script_entries` / `collect_signed_assets` take that index rather
+  than reopening the inputs themselves.
 - The `lua51_stripped` and `lua52_stripped` bytecode fixtures are gone. They
   were byte-for-byte copies of the unstripped ones: `string.dump` only grew its
   strip argument in 5.3, and earlier versions ignore the extra parameter rather

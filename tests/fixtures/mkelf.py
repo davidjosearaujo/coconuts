@@ -1,8 +1,10 @@
-"""Builds a minimal aarch64 ET_DYN ELF containing a Cocos-shaped setXXTEAKeyAndSign call.
+"""Builds minimal aarch64 ET_DYN ELFs in the two shapes the static searches look for: a
+Cocos-shaped setXXTEAKeyAndSign call site (`build`), and a decrypt-failure function whose calls
+include the one to xxtea_decrypt (`build_decrypt_fail`).
 
-There is no aarch64 linker on this host, so the fixture is assembled directly. That is an
-advantage for testing anyway: the vtable offset, argument order and register allocation can all be
-varied to mimic different Cocos builds.
+There is no aarch64 linker on this host, so the fixtures are assembled directly. That is an
+advantage for testing anyway: the vtable offset, argument order, register allocation, call order
+and each callee's xref count can all be set exactly, where a compiler would decide them for us.
 """
 
 from __future__ import annotations
@@ -55,6 +57,21 @@ def ret() -> int:
 
 def nop() -> int:
     return 0xD503201F
+
+
+def _pack_rodata(blobs) -> tuple[bytes, dict[bytes, int]]:
+    """NUL-terminated strings laid out back to back, with the offset of each."""
+    data = bytearray()
+    offsets: dict[bytes, int] = {}
+    for blob in blobs:
+        offsets[bytes(blob)] = len(data)
+        data += bytes(blob) + b"\0"
+    return bytes(data), offsets
+
+
+def _layout(n_insn: int) -> tuple[int, int]:
+    """The .text and .rodata virtual addresses for a .text of `n_insn` instructions."""
+    return BASE + TEXT_OFF, BASE + ((TEXT_OFF + n_insn * 4 + 0xF) & ~0xF)
 
 
 def _assemble(text: bytes, rodata: bytes, syms: dict[str, int],
@@ -142,12 +159,8 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
           stub_symbols: tuple[str, ...] = ()) -> bytes:
     """Returns a shared object whose applicationDidFinishLaunching makes the key/sign call."""
     # .rodata: decoys first so the real strings are not simply the first ones in the section.
-    rodata = bytearray()
-    offsets = {}
     extras = (trailing_call_string,) if trailing_call_string else ()
-    for blob in (*decoy_strings, key, sign, *extras):
-        offsets[bytes(blob)] = len(rodata)
-        rodata += blob + b"\0"
+    rodata, offsets = _pack_rodata((*decoy_strings, key, sign, *extras))
 
     # Lay out .text then .rodata inside one PT_LOAD. Virtual addresses are kept equal to file
     # offsets: tools that map by program header (radare2 among them) would otherwise read the wrong
@@ -155,9 +168,7 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
     # Each stub symbol gets its own one-instruction function, so it does not split the
     # main one: radare2 stops analysing at the next function boundary.
     n_insn = 12 + (3 if trailing_call_string else 0) + len(stub_symbols)
-    text_off = TEXT_OFF
-    rodata_off = (text_off + n_insn * 4 + 0xF) & ~0xF
-    text_vaddr, rodata_vaddr = BASE + text_off, BASE + rodata_off
+    text_vaddr, rodata_vaddr = _layout(n_insn)
     key_at = rodata_vaddr + offsets[bytes(key)]
     sign_at = rodata_vaddr + offsets[bytes(sign)]
 
@@ -199,7 +210,6 @@ def build(key: bytes, sign: bytes, vtable_off: int = 0xE8, symbols: dict[str, in
         return out
 
     text = b"".join(struct.pack("<I", w) for w in emit())
-    rodata = bytes(rodata)
 
     syms = ({"_ZN11AppDelegate29applicationDidFinishLaunchingEv": text_vaddr}
             if symbols is None else dict(symbols))
@@ -226,6 +236,7 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
                        extra_callers: dict[int, int] | None = None,
                        key_via_plt: bool = False,
                        with_key_symbol: bool = True,
+                       with_jdiv: bool = True,
                        decoy_strings: tuple[bytes, ...] = ()) -> tuple[bytes, dict]:
     """A library whose decrypt-failure function calls `n_calls` stubs, one of them the key call.
 
@@ -233,6 +244,10 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
     callee's xref count can be set exactly (the real xxtea_decrypt has two). With `key_via_plt` the
     key call goes to a stub that jumps through x16, like a PLT entry, and the real xxtea_decrypt
     symbol sits elsewhere -- unless `with_key_symbol` is false, when there is nothing to resolve.
+    `with_jdiv` adds the integer-division helper every real engine library links in, at the end of
+    .text. r2_open_and_analyse bounds its analysis to the span before that symbol, so its presence
+    decides which of the two analysis paths runs.
+
     Returns the ELF and the addresses in it.
     """
     extra_callers = dict(extra_callers or {})
@@ -241,11 +256,7 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
     # "nothing callable in the decrypt-failure function" case is built.
     has_key_call = 0 <= key_call_index < n_calls
 
-    rodata = bytearray()
-    offsets = {}
-    for blob in (*decoy_strings, needle):
-        offsets[bytes(blob)] = len(rodata)
-        rodata += blob + b"\0"
+    rodata, offsets = _pack_rodata((*decoy_strings, needle))
 
     MAIN_LEN = n_calls + 5        # prologue, adrp, add, the calls, epilogue, ret
     CALLEE_LEN = 3                # prologue, epilogue, ret
@@ -253,10 +264,8 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
     PLT_LEN = 3                   # adrp x16, ldr x16, br x16 -- a PLT entry has no frame
 
     n_insn = (MAIN_LEN + n_calls * CALLEE_LEN + len(flat_extras) * CALLER_LEN
-              + (PLT_LEN + CALLEE_LEN if key_via_plt else 0))
-    text_off = TEXT_OFF
-    rodata_off = (text_off + n_insn * 4 + 0xF) & ~0xF
-    text_vaddr, rodata_vaddr = BASE + text_off, BASE + rodata_off
+              + (PLT_LEN + CALLEE_LEN if key_via_plt else 0) + (CALLEE_LEN if with_jdiv else 0))
+    text_vaddr, rodata_vaddr = _layout(n_insn)
     needle_at = rodata_vaddr + offsets[bytes(needle)]
 
     # Addresses first, so the calls can be emitted with their targets resolved.
@@ -310,10 +319,18 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
         put(LDP_FP_LR)
         put(ret())
 
+    jdiv_at = pc if with_jdiv else 0
+    if with_jdiv:                                # last, so bounded analysis still covers the rest
+        put(STP_FP_LR)
+        put(LDP_FP_LR)
+        put(ret())
+
     assert len(words) == n_insn, (len(words), n_insn)
     text = b"".join(struct.pack("<I", w) for w in words)
 
     syms = {"_ZN12ScriptingCore9runScriptEPKc": text_vaddr, JNI_BRIDGE: text_vaddr}
+    if with_jdiv:
+        syms["__divdi3_jdiv"] = jdiv_at          # r2.py matches on the 'jdiv' substring
     for i, addr in enumerate(callee_at):
         if i != key_call_index:
             syms[f"stub_{i}"] = addr
@@ -323,8 +340,9 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
         syms[f"stub_{key_call_index}"] = real_key_at
 
     layout = {"fail_fn": text_vaddr, "callees": callee_at, "key_target": key_target,
-              "key_real": real_key_at, "needle_at": needle_at, "callers": caller_at}
-    return _assemble(text, bytes(rodata), syms, text_vaddr, rodata_vaddr), layout
+              "key_real": real_key_at, "needle_at": needle_at, "callers": caller_at,
+              "jdiv": jdiv_at}
+    return _assemble(text, rodata, syms, text_vaddr, rodata_vaddr), layout
 
 
 if __name__ == "__main__":

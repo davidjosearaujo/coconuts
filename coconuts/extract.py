@@ -217,15 +217,14 @@ def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
     return flat
 
 
-def collect_script_entries(stack: contextlib.ExitStack, apk_paths: list[str]) -> dict[str, bytes]:
-    """Collects .jsc / .luac / .lua files from APK zip(s) or directly from local directory path(s),
-    plus the scripts inside any script bundle (.zip) that isn't encrypted."""
+def collect_script_entries(index: dict[str, Asset]) -> dict[str, bytes]:
+    """The .jsc / .luac / .lua files in an asset index, plus the scripts inside any script bundle
+    (.zip) that isn't encrypted."""
     return _flatten_plain_bundles(_collect_entries(
-        _asset_index(stack, apk_paths), lambda rel: rel.endswith(COLLECTED_EXTS), MAX_SCRIPT_BYTES))
+        index, lambda rel: rel.endswith(COLLECTED_EXTS), MAX_SCRIPT_BYTES))
 
 
-def collect_signed_assets(stack: contextlib.ExitStack, apk_paths: list[str], sign: bytes,
-                          known) -> dict[str, bytes]:
+def collect_signed_assets(index: dict[str, Asset], sign: bytes, known) -> dict[str, bytes]:
     """Assets under any extension that start with the script signature, other than `known` paths.
 
     An encrypted script bundle can be named anything (game.bin, res.dat); what gives it away is
@@ -235,16 +234,24 @@ def collect_signed_assets(stack: contextlib.ExitStack, apk_paths: list[str], sig
     if len(sign) < MIN_SIGN_LEN:
         return {}
     found: dict[str, bytes] = {}
-    for rel, (size, read) in _asset_index(stack, apk_paths).items():
+    for rel, (size, read) in index.items():
         if rel not in known and len(sign) < size <= MAX_SCRIPT_BYTES and read(len(sign)) == sign:
             found[rel] = read()
     return found
 
 
-def collect_scripts(apk_paths: list[str], logger: logging.Logger = log) -> dict[str, bytes]:
-    """Collects the scripts from the input paths and reports how many there are."""
-    with contextlib.ExitStack() as stack:
-        entries = collect_script_entries(stack, apk_paths)
+def collect_scripts(apk_paths: list[str], logger: logging.Logger = log,
+                    index: dict[str, Asset] | None = None) -> dict[str, bytes]:
+    """Collects the scripts from the input paths and reports how many there are.
+
+    `index` reuses an asset index already built for the same paths, so a caller that needs one
+    anyway (extract_offline, for the signature scan) does not walk the inputs twice.
+    """
+    if index is not None:
+        entries = collect_script_entries(index)
+    else:
+        with contextlib.ExitStack() as stack:
+            entries = collect_script_entries(_asset_index(stack, apk_paths))
     if entries:
         logger.info("Found %d script(s) across %d input path(s).", len(entries), len(apk_paths))
     return entries
@@ -465,7 +472,20 @@ def extract_offline(
         if aes is not None:
             return _extract_offline_aes(stack, apk_paths, aes, out_dir)
 
-        entries = preloaded_entries if preloaded_entries is not None else collect_scripts(apk_paths)
+        # One pass over the inputs, shared by script collection and the signature scan below:
+        # for an APK that means parsing its central directory once rather than twice. Built on
+        # demand, since neither is needed when the caller already collected the scripts and no
+        # signature is known to scan for.
+        index: dict[str, Asset] | None = None
+
+        def asset_index() -> dict[str, Asset]:
+            nonlocal index
+            if index is None:
+                index = _asset_index(stack, apk_paths)
+            return index
+
+        entries = (preloaded_entries if preloaded_entries is not None
+                   else collect_scripts(apk_paths, index=asset_index()))
 
         report = LuaBytecodeReport()
         known = set(entries)
@@ -480,7 +500,7 @@ def extract_offline(
         def add_signed_assets(sign: bytes) -> None:
             nonlocal scanned
             scanned = True
-            extra = collect_signed_assets(stack, apk_paths, sign, known)
+            extra = collect_signed_assets(asset_index(), sign, known)
             if extra:
                 log.info("%d more asset(s) start with the script signature (script bundle?).", len(extra))
                 entries.update(extra)

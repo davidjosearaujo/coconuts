@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from coconuts.extract import collect_scripts, extract_offline
 
 from .conftest import (
@@ -71,6 +73,32 @@ class TestPlainBundle:
         assert (out / "ok.lua").exists()
         assert not (tmp_path / "evil.lua").exists()
         assert not (tmp_path.parent / "evil.lua").exists()
+
+
+class TestInputReads:
+    def test_the_inputs_are_read_once(self, tmp_path: Path, kind: str, key: bytes,
+                                      monkeypatch: pytest.MonkeyPatch) -> None:
+        """Script collection and the signature scan share one pass over the inputs, so an APK's
+        central directory is parsed once rather than once per step."""
+        import zipfile
+
+        assets = {"src/main.luac": encrypt_asset(LUAJIT_CHUNK),
+                  "res/game.bin": encrypt_asset(make_zip({"src/b.lua": LUA_SOURCE}))}
+        source = asset_source(tmp_path, kind, assets)
+
+        opened: list[str] = []
+        real = zipfile.ZipFile
+
+        class Counting(real):
+            def __init__(self, file, *a, **kw):
+                if isinstance(file, str) and file == source:
+                    opened.append(file)
+                super().__init__(file, *a, **kw)
+
+        monkeypatch.setattr(zipfile, "ZipFile", Counting)
+        extract_offline([source], key, None, str(tmp_path / "out"), forced_sign=SIGN)
+        expected = 1 if kind == "apk" else 0   # a directory is walked, never opened as a zip
+        assert len(opened) == expected, f"the input was read {len(opened)} times"
 
 
 class TestEncryptedBundle:

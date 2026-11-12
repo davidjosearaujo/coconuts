@@ -8,11 +8,21 @@ missing dependency.
 from __future__ import annotations
 
 import shutil
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
-from .fixtures.mkelf import BASE, TEXT_OFF, build
+from coconuts.r2 import (
+    DECRYPT_FAIL_NEEDLES,
+    EVAL_STRING_NEEDLES,
+    KEY_CALL_INDEX,
+    find_key_function,
+    find_string_xref_function,
+    r2_open_and_analyse,
+)
+
+from .fixtures.mkelf import BASE, TEXT_OFF, build, build_decrypt_fail
 
 pytestmark = pytest.mark.skipif(shutil.which("r2") is None, reason="radare2 is not installed")
 
@@ -22,6 +32,10 @@ TEXT = BASE + TEXT_OFF
 APP_DELEGATE = "_ZN11AppDelegate29applicationDidFinishLaunchingEv"
 LUA_BRIDGE = "Java_org_cocos2dx_lib_Cocos2dxLuaJavaBridge_callLuaFunctionWithString"
 JS_BRIDGE = "Java_org_cocos2dx_lib_Cocos2dxJavascriptJavaBridge_evalString"
+# The decrypt-failure fixtures put the key call at this index deliberately, rather than reading
+# KEY_CALL_INDEX: building them from the value under test would move the goalposts with it, and
+# the tests would pass whatever it was changed to.
+KEY_CALL = 12
 
 
 def engine_lib(tmp_path: Path, *, bridge: str = LUA_BRIDGE, stubs=("xxtea_decrypt",),
@@ -121,24 +135,6 @@ class TestResolveFridaTargets:
 # what makes the call order and the xref counts exact.
 # ---------------------------------------------------------------------------
 
-from contextlib import contextmanager  # noqa: E402
-
-from coconuts.r2 import (  # noqa: E402
-    DECRYPT_FAIL_NEEDLES,
-    EVAL_STRING_NEEDLES,
-    KEY_CALL_INDEX,
-    find_key_function,
-    find_string_xref_function,
-    r2_open_and_analyse,
-)
-
-# The fixtures put the key call at this index deliberately, rather than reading KEY_CALL_INDEX:
-# building them from the value under test would move the goalposts with it, and the tests would
-# pass whatever it was changed to.
-KEY_CALL = 12
-
-from .fixtures.mkelf import build_decrypt_fail  # noqa: E402
-
 
 @contextmanager
 def analysed(tmp_path: Path, name: str = "libcocos2djs.so", **kw):
@@ -152,6 +148,24 @@ def analysed(tmp_path: Path, name: str = "libcocos2djs.so", **kw):
         yield r2, strings, symbols, layout
     finally:
         r2.quit()
+
+
+class TestAnalysisBounds:
+    """Which of r2_open_and_analyse's two analysis paths runs depends on the division helper."""
+
+    def test_bounded_when_the_division_helper_is_present(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            with analysed(tmp_path) as (r2, strings, _syms, layout):
+                assert find_string_xref_function(r2, strings, DECRYPT_FAIL_NEEDLES) == layout["fail_fn"]
+        assert "without limits" not in caplog.text
+
+    def test_unbounded_and_warned_about_without_it(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            with analysed(tmp_path, with_jdiv=False) as (r2, strings, _syms, layout):
+                assert find_string_xref_function(r2, strings, DECRYPT_FAIL_NEEDLES) == layout["fail_fn"]
+        assert "No 'jdiv' symbol" in caplog.text
 
 
 class TestFindStringXrefFunction:
