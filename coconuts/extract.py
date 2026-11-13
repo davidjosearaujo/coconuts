@@ -69,8 +69,10 @@ def output_name(rel: str, kind: str) -> str:
         return base if base.lower().endswith(".zip") else base + ".zip"
     if kind == "bytecode":
         return base + ".mozjs.jsc"
-    if kind == "luabytecode" and base.lower().endswith(".lua"):
-        return base + "c"  # still compiled: keep .luac, now decrypted
+    if kind == "luabytecode":
+        # Still compiled: keep .luac, now decrypted. A name that says nothing (a bundle entry is
+        # a module name with the extension stripped) gets one, so the output says what it holds.
+        return base + "c" if base.lower().endswith(".lua") else base + ".luac"
     return base
 
 
@@ -95,12 +97,18 @@ def lua_live_name(chunk_name: str, body: bytes) -> str:
 
 
 def is_plain_script(rel: str, blob: bytes) -> bool:
-    """True for Lua scripts shipped unencrypted (compiled bytecode or source text), which the Lua
-    loader runs as-is. .jsc files are always encrypted, so this is False for them."""
-    if not rel.lower().endswith((".luac", ".lua")):
+    """True for anything shipped unencrypted that the Lua loader runs as-is: compiled bytecode or
+    source text. .jsc files are always encrypted, so this is False for them.
+
+    What a file holds decides, not what it is called. Callers only ask about things already
+    established to be scripts or bundle entries, and a bundle's entries are module names with no
+    extension (see is_script_member) — judging those by name would call an unencrypted chunk
+    encrypted and send the run looking for a key that doesn't exist.
+    """
+    if rel.lower().endswith(".jsc"):
         return False
     if blob.startswith(LUA_MAGICS):
-        return True
+        return True  # a compiled chunk, whatever the file is called
     try:
         text = blob.decode("utf-8")
     except UnicodeDecodeError:
@@ -183,12 +191,35 @@ MAX_SCRIPT_BYTES = 256 * 1024 * 1024  # a script bundle bigger than this is a re
 MIN_SIGN_LEN = 2                      # a shorter signature would match arbitrary assets
 
 
-def _zip_members(blob: bytes, only_scripts: bool = False) -> dict[str, bytes] | None:
-    """The files in a zip held in memory, or None if it isn't one."""
+def is_script_member(name: str, head: bytes) -> bool:
+    """True when a zip entry is a script, by its name or by what it starts with.
+
+    LuaStack::loadChunksFromZIP registers each entry under its own name with the extension
+    stripped ('app.config.ConstantsConfig'), so the entries of a real Lua bundle often carry no
+    extension at all and only their first bytes give them away. `head` need only be the first
+    four bytes.
+    """
+    return name.lower().endswith(SCRIPT_EXTS) or head.startswith(LUA_MAGICS)
+
+
+def _bundle_members(blob: bytes) -> dict[str, bytes] | None:
+    """The entries of a zip that is a script bundle, or None if it isn't a zip or holds no script.
+
+    One identifiable entry is enough: loadChunksFromZIP registers every entry of the zip it is
+    given as a chunk, so the rest are chunks too — including any encrypted inside the bundle,
+    which start with a signature instead of a header anything could recognise. A zip with no
+    script in it is a resource pack, and only the first four bytes of its entries are ever read,
+    so it is never decompressed whole.
+    """
     try:
         with zipfile.ZipFile(io.BytesIO(blob)) as zf:
-            return {i.filename: zf.read(i) for i in zf.infolist()
-                    if not i.is_dir() and (not only_scripts or i.filename.lower().endswith(SCRIPT_EXTS))}
+            infos = [i for i in zf.infolist() if not i.is_dir()]
+            # Names first: that pass is central-directory work already done, where reading heads
+            # opens and inflates each entry. Only a bundle named like this game's needs the heads.
+            if not (any(i.filename.lower().endswith(SCRIPT_EXTS) for i in infos)
+                    or any(is_script_member(i.filename, _read_member(zf, i, 4)) for i in infos)):
+                return None
+            return {i.filename: zf.read(i) for i in infos}
     except (zipfile.BadZipFile, NotImplementedError, RuntimeError) as e:
         log.debug("Not a readable zip: %s", e)
         return None
@@ -202,18 +233,39 @@ def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
     other script, so an entry that is itself encrypted still counts as a sample for the key
     search. A zip with no scripts in it is a resource pack and is dropped. A .zip that isn't a
     zip at all is an encrypted bundle and stays as it is, to be decrypted and unpacked later.
+
+    Entries are recognised by content as well as by name, because loadChunksFromZIP strips the
+    extension off the module names it registers (see is_script_member).
     """
     flat: dict[str, bytes] = {}
-    bundles: list[bytes] = []
+    bundles: list[tuple[str, dict[str, bytes]]] = []
     for rel, blob in entries.items():
         if rel.lower().endswith(BUNDLE_EXT) and blob.startswith(ZIP_MAGIC):
-            bundles.append(blob)
+            members = _bundle_members(blob)
+            if members:
+                bundles.append((rel, members))
         else:
             flat[rel] = blob
+
+    # A game that ships one bundle per ABI (game32.zip and game64.zip, the same modules compiled
+    # for a different word size) has every module name in both. Neither copy is the one to drop,
+    # so a name carrying different bytes in another bundle keeps both, under its bundle's name.
+    first: dict[str, bytes] = {}
+    clashing: set[str] = set()
+    for _rel, members in bundles:
+        for name, member in members.items():
+            if first.setdefault(name, member) != member:
+                clashing.add(name)
+    if clashing:
+        log.info("%d module name(s) differ between the %d script bundles; keeping each bundle's "
+                 "copy under the bundle's own name.", len(clashing), len(bundles))
+
+    # The bundle's whole path, so same-named bundles in two directories don't collide in turn.
     # setdefault, so a script shipped loose keeps its own copy over a bundle's.
-    for blob in bundles:
-        for name, member in (_zip_members(blob, only_scripts=True) or {}).items():
-            flat.setdefault(name, member)
+    for rel, members in bundles:
+        stem = rel[:-len(BUNDLE_EXT)]
+        for name, member in members.items():
+            flat.setdefault(f"{stem}/{name}" if name in clashing else name, member)
     return flat
 
 
@@ -375,7 +427,7 @@ def _write_bundle(out_dir: str, members: dict[str, bytes], sign: bytes,
                 log.debug("Decryption failed: %s", name)
                 results.append(FAILED)
                 continue
-        elif not name.lower().endswith(SCRIPT_EXTS):
+        elif not is_script_member(name, blob):
             results.append(write_output(out_dir, name, blob, report))  # a resource, not a script
             continue
         body, kind = unpack_payload(blob)
@@ -388,11 +440,11 @@ def _write_payload(out_dir: str, rel: str, plain: bytes, sign: bytes,
     """Writes one decrypted script; a script bundle (a zip) is unpacked into its entries instead."""
     body, kind = unpack_payload(plain)
     if kind == "zip":
-        members = _zip_members(body)
         # Only a zip of scripts is a bundle. A Creator "zip compress" build also wraps a script in
         # a zip, but that one holds a single .js that isn't named after the file it came from, so
         # unpacking it would lose the name: it is kept as a .zip instead.
-        if members and any(name.lower().endswith(SCRIPT_EXTS) for name in members):
+        members = _bundle_members(body)
+        if members:
             log.info("%s is a script bundle: unpacking %d file(s).", rel, len(members))
             return _write_bundle(out_dir, members, sign, decrypt, report)
     return [write_output(out_dir, output_name(rel, kind), body, report)]

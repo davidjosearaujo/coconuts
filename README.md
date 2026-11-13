@@ -197,6 +197,20 @@ differences:
   other extension (`game.bin`) is found by the script signature, so it needs the signature to be
   known: given with `--sign`, or learned from at least two scripts found by name. A bundle that is
   the only encrypted thing in the APK and has an unusual name can't be spotted without it.
+
+  `loadChunksFromZIP` registers each entry under its own name with the extension stripped, so a real
+  bundle's entries are module names (`app.config.ConstantsConfig`) carrying no extension at all.
+  They are recognised by what they hold rather than by their name, and one recognised entry makes
+  the whole zip a bundle — every entry in it is a chunk, the engine having been handed the zip
+  wholesale — while a zip with no script in it stays a resource pack and is left alone. The output
+  gets the extension back (`app.config.ConstantsConfig.luac`), which is also where a live Frida dump
+  of the same chunk lands.
+- **One bundle per ABI.** A game built for both word sizes ships `game32.zip` and `game64.zip`, the
+  same module names in each compiled for a different arch (see **Bytecode** below). Neither copy is
+  the one to drop, so when a module name carries different bytes in another bundle, every copy is
+  kept under its own bundle's path (`res/game64/app.MyApp.luac`); identical copies are written once
+  under the plain name. Two bundles encrypted *as a whole* are the exception: they are decrypted one
+  asset at a time, neither knowing about the other, so such a pair still yields one arch.
 - **Bytecode.** Many Lua games ship compiled bytecode rather than source. It's decrypted and written
   as `.luac`, and the run reports what it found: PUC Lua 5.1-5.4 or LuaJIT 2.0/2.1, with bitness,
   endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android

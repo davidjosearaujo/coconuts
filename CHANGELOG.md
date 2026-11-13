@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Verified against a real game
+
+Run against a shipped Cocos2d-x Lua game (Happy Teen Patti 1005, arm64, LuaJIT
+2.1 GC64) on a Pixel 7 / Android 13. The Frida side came through intact: the
+loader hook resolved `luaL_loadbuffer` and `luaL_loadbufferx` from the export
+table through `do_dlopen`, and **all 508 chunks it dumped are byte-identical to
+the ones extracted from the APK offline** — chunk capture, the unknown-length
+walk and the module-name output all agreeing with ground truth. The key hook
+captured the game's XXTEA key (`setXXTEAKeyAndSign`) even though this game's
+scripts aren't encrypted, so the key belongs to its other assets.
+
+Two defects came out of it, both fixed below. Still unverified: a real game whose
+scripts *are* encrypted, which is what would exercise the static key search and
+the verification of a captured key (see TODO.md).
+
+### Fixed
+
+- **A real bundle's entries were all dropped, reporting no scripts at all.**
+  `loadChunksFromZIP` registers each entry under its own name with the extension
+  stripped, so a real bundle holds module names (`app.config.ConstantsConfig`)
+  with no extension, and collection kept only entries ending in `.jsc` / `.luac`
+  / `.lua`. Every entry of the game's 508-script `game64.zip` therefore failed
+  the filter, the zip was taken for a resource pack, and both the offline run and
+  the race's static worker ended at "No .jsc / .luac / .lua files found" on a
+  game whose scripts aren't even encrypted. Entries are now recognised by content
+  as well as by name, and one recognised entry makes the whole zip a bundle — so
+  entries encrypted inside it, which start with a signature rather than anything
+  recognisable, come along too. A zip with no script in it is still a resource
+  pack, and only its entries' first four bytes are ever read.
+- **A game shipping one plain bundle per ABI silently lost one arch.**
+  `game32.zip` and `game64.zip` hold the same module names compiled for a
+  different word size, and whichever bundle was read second had all of its entries
+  dropped as duplicates: the run then wrote 32-bit bytecode for a 64-bit device
+  without saying so. Each copy is now kept under its own bundle's path
+  (`res/game64/app.MyApp.luac`) when the bytes differ, identical copies are still
+  written once, and the flavour report names both. A pair of bundles *encrypted as
+  a whole* (`game32.bin` / `game64.bin`) is still collapsed to one arch, as it was
+  before: those are decrypted and written one asset at a time, so neither knows
+  about the other. See TODO.md.
+- `output_name` puts a `.luac` on a decrypted Lua chunk whose name says nothing,
+  the way it already named SpiderMonkey bytecode `.mozjs.jsc`, and
+  `is_plain_script` judges a file by what it holds rather than what it is called.
+  Every entry of a bundle now comes along, chunks and resources alike, and judging
+  those by name called a bundle's source modules and resources ciphertext: a
+  bundle mixing compiled chunks with `.lua` source or a JSON resource failed the
+  whole run with "No working key found" and dumped them to `raw_scripts/`, on a
+  game with no encryption anywhere.
+
 ## [2.1.0] - 2026-11-12
 
 ### Added

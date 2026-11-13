@@ -75,6 +75,100 @@ class TestPlainBundle:
         assert not (tmp_path.parent / "evil.lua").exists()
 
 
+class TestModuleNameEntries:
+    """loadChunksFromZIP registers each entry under its name with the extension stripped, so a
+    real bundle's entries are module names ('app.config.ConstantsConfig') carrying no extension.
+
+    Shape taken from a shipped game (Cocos2d-x Lua, LuaJIT 2.1): 508 such entries in game64.zip,
+    which the extension-only collector used to drop whole, reporting no scripts at all.
+    """
+
+    def test_an_extensionless_entry_is_found_by_its_content(self, tmp_path: Path, kind: str) -> None:
+        bundle = make_zip({"app.config.ConstantsConfig": LUAJIT_CHUNK,
+                           "app.views.MainScene": PUC_CHUNK})
+        out, written = run(tmp_path, kind, {"game64.zip": bundle}, None)
+        assert written == 2
+        # The extension is put back from what the entry holds, so it lands where a live Frida
+        # dump of the same chunk would (lua_live_name gives the same name).
+        assert (out / "app.config.ConstantsConfig.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "app.views.MainScene.luac").read_bytes() == PUC_CHUNK
+
+    def test_an_encrypted_extensionless_entry_is_decrypted(self, tmp_path: Path, kind: str,
+                                                           key: bytes) -> None:
+        bundle = make_zip({"app.MyApp": encrypt_asset(LUAJIT_CHUNK), "app.plain": PUC_CHUNK})
+        out, written = run(tmp_path, kind, {"game.zip": bundle}, key, forced_sign=SIGN)
+        assert written == 2
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "app.plain.luac").read_bytes() == PUC_CHUNK
+
+    def test_inside_a_bundle_that_is_itself_encrypted(self, tmp_path: Path, kind: str,
+                                                      key: bytes) -> None:
+        bundle = encrypt_asset(make_zip({"app.MyApp": LUAJIT_CHUNK, "res.config": b'{"a": 1}'}))
+        out, written = run(tmp_path, kind, {"src.zip": bundle}, key, forced_sign=SIGN)
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "res.config").read_bytes() == b'{"a": 1}'  # a resource keeps its own name
+
+    def test_a_bundle_mixing_chunks_resources_and_source_needs_no_key(self, tmp_path: Path,
+                                                                      kind: str) -> None:
+        """Every entry of a bundle comes along, so what is not a chunk must not look encrypted.
+
+        Judged by name, the source module and the resource here have no extension to go on, are
+        taken for ciphertext, and fail the whole run for want of a key that doesn't exist.
+        """
+        bundle = make_zip({"app.MyApp": LUAJIT_CHUNK, "app.Source": LUA_SOURCE,
+                           "res.config": b'{"a": 1}'})
+        out, written = run(tmp_path, kind, {"game.zip": bundle}, None)
+        assert written == 3
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "app.Source").read_bytes() == LUA_SOURCE
+        assert (out / "res.config").read_bytes() == b'{"a": 1}'
+        assert not (out / "raw_scripts").exists()
+
+    def test_a_resource_pack_of_extensionless_files_is_still_dropped(self, tmp_path: Path,
+                                                                     kind: str) -> None:
+        """Content is what identifies an entry, so a pack of unnamed resources must not qualify."""
+        pack = make_zip({"india_game": b"\x89PNG\r\n\x1a\n" + b"\x00" * 64,
+                         "skeleton.atlas": b'{"skeleton":{"hash":"P/S"}}'})
+        out, written = run(tmp_path, kind, {"res.zip": pack}, None)
+        assert written == 0
+        assert not out.exists() or not list(out.rglob("*")), "nothing should be written"
+
+
+class TestOneBundlePerAbi:
+    """A game shipping game32.zip and game64.zip has the same module names in both, compiled for
+    a different word size. Dropping either silently would hand over the wrong arch's bytecode."""
+
+    # LUAJIT_CHUNK is the GC64 one (flags STRIP|FR2); the 32-bit build clears FR2.
+    CHUNK32 = b"\x1bLJ\x02\x02" + b"\x00" * 40
+
+    def test_both_copies_are_kept_under_their_bundle(self, tmp_path: Path, kind: str) -> None:
+        assets = {"res/game32.zip": make_zip({"app.MyApp": self.CHUNK32}),
+                  "res/game64.zip": make_zip({"app.MyApp": LUAJIT_CHUNK})}
+        out, written = run(tmp_path, kind, assets, None)
+        assert written == 2
+        assert (out / "res/game32/app.MyApp.luac").read_bytes() == self.CHUNK32
+        assert (out / "res/game64/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+
+    def test_same_named_bundles_in_two_directories_dont_collide(self, tmp_path: Path,
+                                                                kind: str) -> None:
+        """The whole bundle path namespaces the copies, not just its basename."""
+        assets = {"a/game.zip": make_zip({"app.MyApp": LUAJIT_CHUNK}),
+                  "b/game.zip": make_zip({"app.MyApp": LUAJIT_CHUNK + b"\x01"})}
+        out, written = run(tmp_path, kind, assets, None)
+        assert written == 2
+        assert (out / "a/game/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "b/game/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK + b"\x01"
+
+    def test_identical_copies_are_written_once_under_the_plain_name(self, tmp_path: Path,
+                                                                    kind: str) -> None:
+        assets = {"res/game32.zip": make_zip({"app.MyApp": LUAJIT_CHUNK}),
+                  "res/game64.zip": make_zip({"app.MyApp": LUAJIT_CHUNK})}
+        out, written = run(tmp_path, kind, assets, None)
+        assert written == 1
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert not list(out.glob("game*"))
+
+
 class TestInputReads:
     def test_the_inputs_are_read_once(self, tmp_path: Path, kind: str, key: bytes,
                                       monkeypatch: pytest.MonkeyPatch) -> None:
