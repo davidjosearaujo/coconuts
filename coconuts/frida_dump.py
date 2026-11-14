@@ -25,6 +25,7 @@ from .r2 import (
     _r2_abort_guard,
     _resolve_relro_set_xxtea_key,
     find_key_function,
+    find_lua_load_function,
     find_string_xref_function,
     find_symbol_vaddr,
     r2_open_and_analyse,
@@ -89,11 +90,16 @@ def build_frida_script(
     dump_off: int | None,
     key_off: int | None,
     key_is_std_string: bool = False,
+    lua_load_off: int | None = None,
 ) -> str:
+    """`lua_load_off` is luaL_loadbuffer, kept apart from `dump_off` (evalString) because the two
+    take different arguments and the agent attaches a different handler to each."""
     return (_load_frida_template()
             .replace("__COCOS_SYMBOL__", json.dumps(cocos_symbol))
             .replace("__DUMP_OFFSET__", f'ptr("{dump_off:#x}")' if dump_off is not None else "null")
             .replace("__KEY_OFFSET__", f'ptr("{key_off:#x}")' if key_off is not None else "null")
+            .replace("__LUA_LOAD_OFFSET__",
+                     f'ptr("{lua_load_off:#x}")' if lua_load_off is not None else "null")
             .replace("__KEY_IS_STD_STRING__", "true" if key_is_std_string else "false"))
 
 
@@ -101,10 +107,10 @@ def resolve_frida_targets(
     lib_path: str,
     abort_event: threading.Event | None = None,
     high_prob_done: threading.Event | None = None,
-) -> tuple[str, int | None, int | None, bool]:
-    """Resolves JNI symbol, dump_off, and key_off using fast symbol/relro check first."""
+) -> tuple[str, int | None, int | None, bool, int | None]:
+    """Resolves JNI symbol, dump_off, key_off and lua_load_off, fast symbol/relro check first."""
     if abort_event and abort_event.is_set():
-        return "", None, None, False
+        return "", None, None, False, None
 
     r2, cocos_symbol, _, symbols = r2_open_and_analyse(
         lib_path, run_heavy_analysis=False, abort_event=abort_event
@@ -112,6 +118,7 @@ def resolve_frida_targets(
     key_is_std_string = False
     dump_off = None
     key_off = None
+    lua_load_off = None
     try:
         if not (abort_event and abort_event.is_set()):
             with _r2_abort_guard(r2, abort_event):
@@ -131,12 +138,18 @@ def resolve_frida_targets(
                 ])
                 if dump_off:
                     flog.info("evalString found in the symbol table at %#x", dump_off)
+
+                # The Lua loader is looked up separately: a lib can carry one and not the other,
+                # and the agent attaches a different handler to each.
+                lua_load_off = find_symbol_vaddr(symbols, [r"luaL_loadbufferx?$"])
+                if lua_load_off:
+                    flog.info("luaL_loadbuffer found in the symbol table at %#x", lua_load_off)
     finally:
         with contextlib.suppress(Exception):
             r2.quit()
 
     if abort_event and abort_event.is_set():
-        return cocos_symbol, dump_off, key_off, key_is_std_string
+        return cocos_symbol, dump_off, key_off, key_is_std_string, lua_load_off
 
     # Only run heavy `aap; aaef` if key_off was not found via symbol table or .data.rel.ro.
     # Wait for high-probability static tiers (Tier0..Tier2) first; if Tier 3 continues,
@@ -147,7 +160,7 @@ def resolve_frida_targets(
 
         if abort_event and abort_event.is_set():
             flog.info("Static track already found the key; skipping radare2 analysis.")
-            return cocos_symbol, dump_off, key_off, key_is_std_string
+            return cocos_symbol, dump_off, key_off, key_is_std_string, lua_load_off
 
         r2, cocos_symbol, strings, symbols = r2_open_and_analyse(
             lib_path, run_heavy_analysis=True, abort_event=abort_event
@@ -171,6 +184,18 @@ def resolve_frida_targets(
                         if not (abort_event and abort_event.is_set()):
                             flog.warning("Dump function not found statically (%s); continuing with key-only/export hooks.", e)
                             flog.debug("details", exc_info=True)
+
+                # A Lua lib has no evalString at all, so this is the only dump target it can
+                # offer once luaL_loadbuffer has been hidden from the symbol table. Searched
+                # only on the heavy path, which a lib stripped that far has already triggered.
+                if lua_load_off is None and not (abort_event and abort_event.is_set()):
+                    try:
+                        lua_load_off = find_lua_load_function(r2, strings, symbols)
+                        flog.info("Lua loader at %#x", lua_load_off)
+                    except Exception as e:
+                        if not (abort_event and abort_event.is_set()):
+                            flog.warning("Lua loader not found statically (%s); Frida will try symbol exports.", e)
+                            flog.debug("details", exc_info=True)
         finally:
             with contextlib.suppress(Exception):
                 r2.quit()
@@ -178,7 +203,7 @@ def resolve_frida_targets(
         if abort_event and abort_event.is_set():
             flog.info("Static track found the key; stopping.")
 
-    return cocos_symbol, dump_off, key_off, key_is_std_string
+    return cocos_symbol, dump_off, key_off, key_is_std_string, lua_load_off
 
 
 def run_frida_race(

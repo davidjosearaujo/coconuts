@@ -537,5 +537,78 @@ section('[11] the loader hook attaches to do_dlopen itself, not a lambda inside 
         F.logs(/Hooks installed/).length === 1, F.logs(/Hooks installed/).length);
 }
 
+// ===========================================================================
+section('[12] the key setter reached through the LuaStack vtable');
+// A game can strip setXXTEAKeyAndSign and still export LuaEngine::getLuaStack -- a real one does.
+// The slot is read off an instance the game itself hands back, so getInstance is never called
+// from the agent, and nothing is attached unless every pointer is where it should be.
+const GET_LUA_STACK = '_ZN7cocos2d9LuaEngine11getLuaStackEv';
+const SETKEY_SLOT_OFF = 29 * 8;
+
+// A module with no key-setter symbol, plus a vtable laid out inside it.
+function vtableLib(F, opts) {
+    const o = opts || {};
+    const lib = F.makeModule('libcocos2dlua.so', {
+        exports: [LUA_BRIDGE, 'luaL_loadbufferx'],
+        symbols: ['luaL_loadbufferx', GET_LUA_STACK],
+    });
+    lib._exports.push({ name: GET_LUA_STACK, address: lib.base.add(0x900) });
+    const vtable = lib.base.add(0x2000);
+    const setter = o.setterOutside ? F.alloc(Buffer.alloc(8)) : lib.base.add(0x3000);
+    F.MEM.writeBigUInt64LE(BigInt(setter.addr), vtable.addr + SETKEY_SLOT_OFF);
+
+    // The instance is on the heap, as a real one is; only the vtable it points at is in the lib.
+    const stack = F.alloc(Buffer.alloc(8));
+    F.MEM.writeBigUInt64LE(BigInt(o.badVtable ? 0x40 : vtable.addr), stack.addr);
+    return { lib, vtable, setter, stack, getLuaStack: lib.findExportByName(GET_LUA_STACK) };
+}
+
+{
+    const F = boot('lua.js');
+    const v = vtableLib(F);
+    F.dlopen('libcocos2dlua.so');
+    check('getLuaStack is hooked when the setter is missing', F.attached.has(v.getLuaStack.addr));
+    check('nothing is attached to the slot before the game returns an instance',
+        !F.attached.has(v.setter.addr));
+
+    F.fire(v.getLuaStack, [F.int(0xdead)], v.stack);
+    check('the slot is hooked once an instance comes back', F.attached.has(v.setter.addr));
+
+    F.fire(v.setter, [v.stack, F.allocStr('vtablekey'), F.int(9), F.allocStr('LAKYSIGN'), F.int(8)]);
+    const keys = F.ofType('key');
+    check('the key arrives through the vtable hook',
+        keys.length === 1 && Buffer.from(keys[0].payload.key, 'hex').toString() === 'vtablekey',
+        keys[0] && keys[0].payload.key);
+    check('and its signature with it',
+        keys[0] && Buffer.from(keys[0].payload.sign, 'hex').toString() === 'LAKYSIGN');
+}
+{
+    // An object whose first word is not a vtable in this library: a wrong slot would attach a
+    // trampoline to whatever is at that address, so nothing may be attached at all.
+    const F = boot('lua.js');
+    const v = vtableLib(F, { badVtable: true });
+    F.dlopen('libcocos2dlua.so');
+    F.fire(v.getLuaStack, [F.int(0xdead)], v.stack);
+    check('a vtable outside the library is refused', !F.attached.has(v.setter.addr));
+    check('and no key is reported', F.ofType('key').length === 0);
+}
+{
+    // The slot points outside the library: not this library's code, so not the setter.
+    const F = boot('lua.js');
+    const v = vtableLib(F, { setterOutside: true });
+    F.dlopen('libcocos2dlua.so');
+    F.fire(v.getLuaStack, [F.int(0xdead)], v.stack);
+    check('a slot pointing outside the library is refused', !F.attached.has(v.setter.addr));
+}
+{
+    // Where the symbol is present the direct hook is used and the probe stays out of the way.
+    const F = boot('lua.js');
+    const lib = luaLib(F);
+    F.dlopen('libcocos2dlua.so');
+    check('the exported setter is hooked directly',
+        F.attached.has(lib.findExportByName(LUA_KEY_SYM).addr));
+    check('no getLuaStack probe is installed', !F.logs(/vtable/).length);
+}
+
 console.log('\n' + total + ' checks, ' + (failures || 'no') + ' failure' + (failures === 1 ? '' : 's'));
 process.exit(failures ? 1 : 0);

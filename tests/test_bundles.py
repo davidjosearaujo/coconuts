@@ -168,6 +168,106 @@ class TestOneBundlePerAbi:
         assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
         assert not list(out.glob("game*"))
 
+    def test_an_encrypted_pair_keeps_both_copies(self, tmp_path: Path, kind: str,
+                                                 key: bytes) -> None:
+        """Bundles encrypted as a whole are a pair only once both have been decrypted, so they
+        are written after that pass rather than as each one is decrypted."""
+        assets = {"res/game32.bin": encrypt_asset(make_zip({"app.MyApp": self.CHUNK32})),
+                  "res/game64.bin": encrypt_asset(make_zip({"app.MyApp": LUAJIT_CHUNK}))}
+        out, written = run(tmp_path, kind, assets, key, forced_sign=SIGN)
+        assert written == 2
+        assert (out / "res/game32/app.MyApp.luac").read_bytes() == self.CHUNK32
+        assert (out / "res/game64/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+
+    def test_two_bundles_whose_names_differ_only_by_extension(self, tmp_path: Path, kind: str,
+                                                              key: bytes) -> None:
+        """game.bin beside game.dat: the extension is all that tells them apart, so dropping it
+        to namespace with would put both copies back in one place."""
+        assets = {"res/game.bin": encrypt_asset(make_zip({"app.MyApp": self.CHUNK32})),
+                  "res/game.dat": encrypt_asset(make_zip({"app.MyApp": LUAJIT_CHUNK}))}
+        out, written = run(tmp_path, kind, assets, key, forced_sign=SIGN)
+        assert written == 2
+        assert (out / "res/game.bin/app.MyApp.luac").read_bytes() == self.CHUNK32
+        assert (out / "res/game.dat/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+
+    def test_a_plain_bundle_beside_an_encrypted_one(self, tmp_path: Path, kind: str,
+                                                    key: bytes) -> None:
+        """The two are flattened by different passes -- plain as the scripts are collected,
+        encrypted once the key is known -- so neither sees the other's module names. The copy
+        that arrives second must still land somewhere."""
+        assets = {"res/plain.zip": make_zip({"app.MyApp": self.CHUNK32}),
+                  "res/game.bin": encrypt_asset(make_zip({"app.MyApp": LUAJIT_CHUNK}))}
+        out, written = run(tmp_path, kind, assets, key, forced_sign=SIGN)
+        assert written == 2
+        assert (out / "app.MyApp.luac").read_bytes() == self.CHUNK32
+        assert (out / "res/game/app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+
+    def test_a_live_dump_keeps_the_name_and_the_bundle_copy_is_not_lost(
+            self, tmp_path: Path, kind: str, key: bytes) -> None:
+        """A live dump is the arch the game actually ran, so it keeps the plain name; the
+        bundle's other copy goes under the bundle rather than into "already there"."""
+        out = tmp_path / "out"
+        (out / "res").mkdir(parents=True)
+        (out / "app.MyApp.luac").write_bytes(LUAJIT_CHUNK)   # as if dumped live
+        assets = {"res/game32.bin": encrypt_asset(make_zip({"app.MyApp": self.CHUNK32}))}
+        _, written = run(tmp_path, kind, assets, key, forced_sign=SIGN)
+        assert written == 1
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "res/game32/app.MyApp.luac").read_bytes() == self.CHUNK32
+
+
+class TestSignatureFromTheAssets:
+    """When nothing teaches the signature -- no --sign, and too few scripts found by name to
+    detect one from -- it is worked out from the assets themselves. Gated, so only assets whose
+    first bytes match no format we recognise get a vote."""
+
+    PNG = b"\x89PNG\r\n\x1a\n" + bytes(range(64))
+    JSON = b'{"levels": [1, 2, 3], "name": "world one"}' + b" " * 32
+
+    def test_an_encrypted_bundle_under_an_unusual_name_is_found(
+            self, tmp_path: Path, kind: str, key: bytes) -> None:
+        """res/game.bin is a zip of scripts encrypted whole: no script extension anywhere, so
+        collection by name finds nothing and there is no prefix to learn from."""
+        assets = {"res/game.bin": encrypt_asset(make_zip({"app.MyApp": LUAJIT_CHUNK})),
+                  "res/data.bin": encrypt_asset(make_zip({"app.Other": PUC_CHUNK})),
+                  "res/logo.png": self.PNG,
+                  "res/levels.json": self.JSON}
+        out, written = run(tmp_path, kind, assets, key)      # no --sign
+        assert written == 2
+        assert (out / "app.MyApp.luac").read_bytes() == LUAJIT_CHUNK
+        assert (out / "app.Other.luac").read_bytes() == PUC_CHUNK
+
+    def test_the_signature_is_reported(self, tmp_path: Path, kind: str, key: bytes,
+                                       caplog: pytest.LogCaptureFixture) -> None:
+        assets = {"res/a.bin": encrypt_asset(make_zip({"app.A": LUAJIT_CHUNK})),
+                  "res/b.bin": encrypt_asset(make_zip({"app.B": PUC_CHUNK}))}
+        with caplog.at_level("INFO"):
+            run(tmp_path, kind, assets, key)
+        assert "worked out from" in caplog.text
+
+    def test_resources_alone_do_not_invent_a_signature(self, tmp_path: Path, kind: str,
+                                                       caplog: pytest.LogCaptureFixture) -> None:
+        """A game of textures and JSON must come out as 'no scripts', not as a signature
+        elected by whatever its resources happen to share."""
+        assets = {"res/a.png": self.PNG, "res/b.png": self.PNG + b"x",
+                  "res/c.json": self.JSON, "res/d.json": self.JSON + b" "}
+        with caplog.at_level("WARNING"):
+            _out, written = run(tmp_path, kind, assets, None)
+        assert written == 0
+        assert "No .jsc / .luac / .lua files found" in caplog.text
+
+    def test_a_game_found_by_name_does_not_need_the_scan(
+            self, tmp_path: Path, kind: str, key: bytes,
+            caplog: pytest.LogCaptureFixture) -> None:
+        """Two scripts by name already teach the prefix, so the asset scan stays out of it."""
+        assets = {"src/a.luac": encrypt_asset(LUAJIT_CHUNK),
+                  "src/b.luac": encrypt_asset(PUC_CHUNK),
+                  "res/logo.png": self.PNG}
+        with caplog.at_level("INFO"):
+            _out, written = run(tmp_path, kind, assets, key)
+        assert written == 2
+        assert "worked out from" not in caplog.text
+
 
 class TestInputReads:
     def test_the_inputs_are_read_once(self, tmp_path: Path, kind: str, key: bytes,

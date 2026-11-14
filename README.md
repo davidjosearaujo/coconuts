@@ -195,8 +195,9 @@ differences:
   encrypted one is decrypted and then unpacked. Entries that are themselves encrypted are decrypted
   too, and the entries land in the output folder under their own paths. An encrypted bundle with any
   other extension (`game.bin`) is found by the script signature, so it needs the signature to be
-  known: given with `--sign`, or learned from at least two scripts found by name. A bundle that is
-  the only encrypted thing in the APK and has an unusual name can't be spotted without it.
+  known: given with `--sign`, or learned from at least two scripts found by name. Failing both, it
+  is worked out from the assets themselves — but only from those whose first bytes match no format
+  coconuts recognises, so a folder of textures can't elect its own magic as the signature.
 
   `loadChunksFromZIP` registers each entry under its own name with the extension stripped, so a real
   bundle's entries are module names (`app.config.ConstantsConfig`) carrying no extension at all.
@@ -209,8 +210,9 @@ differences:
   same module names in each compiled for a different arch (see **Bytecode** below). Neither copy is
   the one to drop, so when a module name carries different bytes in another bundle, every copy is
   kept under its own bundle's path (`res/game64/app.MyApp.luac`); identical copies are written once
-  under the plain name. Two bundles encrypted *as a whole* are the exception: they are decrypted one
-  asset at a time, neither knowing about the other, so such a pair still yields one arch.
+  under the plain name. Bundles encrypted *as a whole* (`game32.bin` / `game64.bin`) are handled the
+  same way: they only become a pair once both are decrypted, so they are written after that pass
+  rather than during it.
 - **Bytecode.** Many Lua games ship compiled bytecode rather than source. It's decrypted and written
   as `.luac`, and the run reports what it found: PUC Lua 5.1-5.4 or LuaJIT 2.0/2.1, with bitness,
   endianness and whether debug info was stripped. `cocos luacompile` goes through LuaJIT on Android
@@ -238,10 +240,18 @@ differences:
   don't, so you get `slot0` instead of `a`. And a game shipping a patched LuaJIT opcode table
   produces plausible-looking nonsense with a zero exit code, which nothing can detect for you.
 
-Lua support has not been run against a shipped Lua game yet. The Frida hooks have been checked on a
-real arm64 phone against engine libraries built from real Lua 5.1, Lua 5.3 and LuaJIT sources
-(`tests/fixtures/android/`), but the APK-side paths have only seen synthetic assets. Open items are
-tracked in [TODO.md](TODO.md).
+Lua support has been run against two shipped games on a real arm64 phone, one unencrypted and one
+encrypted. On the unencrypted one the loader hook dumped 508 chunks byte-identical to the offline
+extraction of the same APK. On the encrypted one (signature `LAKYSIGN`) the key hook captured the
+game's XXTEA key at runtime, it was verified against real encrypted scripts before being trusted,
+and decrypting the APK with it reproduced the 4265 scripts the running game loaded **byte for
+byte**. The Frida hooks are also checked against engine libraries built from real Lua 5.1, Lua 5.3
+and LuaJIT sources (`tests/fixtures/android/`).
+
+Three fallbacks are implemented and tested but have never had to fire on a real game, because both
+shipped libraries exported what the ordinary path wanted: the vtable route to a stripped key setter,
+the radare2 anchor for a hidden Lua loader, and the asset scan that works out a signature when
+nothing else teaches it.
 
 ## Supported encryption schemes
 

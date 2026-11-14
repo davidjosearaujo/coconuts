@@ -17,12 +17,14 @@ from coconuts.r2 import (
     DECRYPT_FAIL_NEEDLES,
     EVAL_STRING_NEEDLES,
     KEY_CALL_INDEX,
+    LUA_LOAD_NEEDLES,
     find_key_function,
+    find_lua_load_function,
     find_string_xref_function,
     r2_open_and_analyse,
 )
 
-from .fixtures.mkelf import BASE, TEXT_OFF, build, build_decrypt_fail
+from .fixtures.mkelf import BASE, TEXT_OFF, build, build_decrypt_fail, build_lua_load
 
 pytestmark = pytest.mark.skipif(shutil.which("r2") is None, reason="radare2 is not installed")
 
@@ -104,17 +106,19 @@ class TestOpenAndAnalyse:
 class TestResolveFridaTargets:
     def test_finds_xxtea_decrypt(self, tmp_path: Path) -> None:
         from coconuts.frida_dump import resolve_frida_targets
-        symbol, dump_off, key_off, is_std_string = resolve_frida_targets(engine_lib(tmp_path))
+        symbol, dump_off, key_off, is_std_string, lua_off = resolve_frida_targets(
+            engine_lib(tmp_path))
         assert symbol == LUA_BRIDGE
         assert key_off is not None and not is_std_string
         assert dump_off is None  # no evalString in a Lua engine
+        assert lua_off is None   # nor a luaL_loadbuffer symbol in this fixture
 
     def test_offset_is_relative_to_the_library_base(self, tmp_path: Path) -> None:
         """The agent does base.add(KEY_OFFSET) at runtime, so this must be an offset into the
         image, not an absolute address. Android links shared objects at base vaddr 0, which is
         what makes the symbol's vaddr usable directly."""
         from coconuts.frida_dump import resolve_frida_targets
-        _sym, _dump, key_off, _ = resolve_frida_targets(engine_lib(tmp_path))
+        _sym, _dump, key_off, _, _lua = resolve_frida_targets(engine_lib(tmp_path))
         # xxtea_decrypt is the first stub, placed right after the main function.
         assert key_off == TEXT + 12 * 4 - BASE
 
@@ -123,7 +127,7 @@ class TestResolveFridaTargets:
         lib = engine_lib(tmp_path, bridge=JS_BRIDGE,
                          stubs=("_ZN7cocos2d12ScriptEngine10evalStringEPKcl", "xxtea_decrypt"),
                          name="libcocos2djs.so")
-        _sym, dump_off, key_off, _ = resolve_frida_targets(lib)
+        _sym, dump_off, key_off, _, _lua = resolve_frida_targets(lib)
         assert dump_off is not None
         assert key_off is not None and key_off != dump_off
 
@@ -166,6 +170,82 @@ class TestAnalysisBounds:
             with analysed(tmp_path, with_jdiv=False) as (r2, strings, _syms, layout):
                 assert find_string_xref_function(r2, strings, DECRYPT_FAIL_NEEDLES) == layout["fail_fn"]
         assert "No 'jdiv' symbol" in caplog.text
+
+
+@contextmanager
+def lua_analysed(tmp_path: Path, name: str = "libcocos2dlua.so", **kw):
+    """Builds a Lua-load library, analyses it the way the tool does, and yields the handle, its
+    strings and symbols, and the addresses the fixture was built with."""
+    blob, layout = build_lua_load(**kw)
+    path = tmp_path / name
+    path.write_bytes(blob)
+    r2, _bridge, strings, symbols = r2_open_and_analyse(str(path), run_heavy_analysis=True)
+    try:
+        yield r2, strings, symbols, layout
+    finally:
+        r2.quit()
+
+
+class TestFindLuaLoadFunction:
+    """A Lua lib has no evalString to anchor on, so the loader is found by the strings
+    LuaStack::luaLoadBuffer logs and then by call count: the loader once, the logger per case.
+
+    The fixtures carry no luaL_loadbuffer symbol unless a test asks for one -- a lib that still
+    exports it never needs any of this.
+    """
+
+    def test_the_loader_is_the_target_called_exactly_once(self, tmp_path: Path) -> None:
+        with lua_analysed(tmp_path) as (r2, strings, syms, layout):
+            found = find_lua_load_function(r2, strings, syms)
+        assert found == layout["loader"]
+        assert found != layout["logger"], "the logger is the other call in there"
+
+    @pytest.mark.parametrize("n_log", [2, 4, 7])
+    def test_however_many_ways_the_load_can_fail(self, tmp_path: Path, n_log: int) -> None:
+        """The count of log calls tracks the Cocos version's switch, so it must not be relied on
+        beyond being more than one."""
+        with lua_analysed(tmp_path, n_log=n_log) as (r2, strings, syms, layout):
+            assert find_lua_load_function(r2, strings, syms) == layout["loader"]
+
+    @pytest.mark.parametrize("needle", LUA_LOAD_NEEDLES)
+    def test_every_needle_the_tool_ships_is_matched(self, tmp_path: Path, needle: str) -> None:
+        """Each needle is a fragment of a real engine message, and each has to find the function
+        on its own: the fixture carries only the one message."""
+        message = needle.encode() + b" (chunk)"
+        with lua_analysed(tmp_path, needle=message) as (r2, strings, syms, layout):
+            assert find_lua_load_function(r2, strings, syms) == layout["loader"]
+
+    def test_ambiguity_is_reported_rather_than_guessed(self, tmp_path: Path) -> None:
+        """A second callee called once leaves nothing to tell the loader by, and a wrong guess
+        attaches the dump handler to an unrelated function."""
+        with lua_analysed(tmp_path, extra_once=1) as (r2, strings, syms, _layout):
+            with pytest.raises(RuntimeError, match="Cannot tell the loader from the logger"):
+                find_lua_load_function(r2, strings, syms)
+
+    def test_a_loader_called_twice_is_not_picked_over_the_logger(self, tmp_path: Path) -> None:
+        """An unoptimised build calls the loader from both branches of the xxtea check. Then no
+        target is unique and the search declines rather than hooking the logger."""
+        with lua_analysed(tmp_path, n_loader=2) as (r2, strings, syms, _layout):
+            with pytest.raises(RuntimeError, match="Cannot tell the loader"):
+                find_lua_load_function(r2, strings, syms)
+
+    def test_a_plt_stub_resolves_to_the_real_symbol(self, tmp_path: Path) -> None:
+        with lua_analysed(tmp_path, loader_via_plt=True,
+                          with_loader_symbol=True) as (r2, strings, syms, layout):
+            assert find_lua_load_function(r2, strings, syms) == layout["loader_real"]
+
+    def test_a_plt_stub_with_nothing_behind_it_hooks_the_stub(
+            self, tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+        with caplog.at_level("WARNING"):
+            with lua_analysed(tmp_path, loader_via_plt=True,
+                              with_loader_symbol=False) as (r2, strings, syms, layout):
+                assert find_lua_load_function(r2, strings, syms) == layout["loader"]
+        assert "PLT stub" in caplog.text
+
+    def test_a_library_with_no_lua_message_is_reported(self, tmp_path: Path) -> None:
+        with lua_analysed(tmp_path, needle=b"nothing to do with loading") as (r2, s, syms, _l):
+            with pytest.raises(RuntimeError, match="String not found"):
+                find_lua_load_function(r2, s, syms)
 
 
 class TestFindStringXrefFunction:

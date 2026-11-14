@@ -345,6 +345,112 @@ def build_decrypt_fail(needle: bytes = b"Can\'t decrypt code for %s",
     return _assemble(text, rodata, syms, text_vaddr, rodata_vaddr), layout
 
 
+# --- the LuaStack::luaLoadBuffer shape ---------------------------------------------------------
+#
+# find_lua_load_function() finds the function referencing one of the "[LUA ERROR] load" strings,
+# then picks luaL_loadbuffer out of its `bl`s by call count: the loader is called once and the
+# logger once per error case. Measured in a shipped arm64 game, luaLoadBuffer is 184 bytes and
+# makes 5 calls -- 1 to luaL_loadbuffer, 4 to cocos2d::log. Assembled by hand so the counts are
+# exact rather than whatever a compiler decides.
+
+LUA_BRIDGE = "Java_org_cocos2dx_lib_Cocos2dxLuaJavaBridge_callLuaFunctionWithString"
+LUA_LOAD_NEEDLE = b'[LUA ERROR] load "%s", error: syntax error during pre-compilation.'
+
+
+def build_lua_load(needle: bytes = LUA_LOAD_NEEDLE,
+                   n_log: int = 4,
+                   n_loader: int = 1,
+                   extra_once: int = 0,
+                   loader_via_plt: bool = False,
+                   with_loader_symbol: bool = False,
+                   with_jdiv: bool = True,
+                   decoy_strings: tuple[bytes, ...] = ()) -> tuple[bytes, dict]:
+    """A library whose Lua load function logs `needle` and calls a logger `n_log` times.
+
+    The loader is called `n_loader` times, so a build where the asymmetry does not hold can be
+    tested too. `extra_once` adds further callees called exactly once, which is what makes the
+    loader ambiguous. With `loader_via_plt` the loader call goes through an x16 hop like a PLT
+    entry, and the real luaL_loadbufferx sits behind it -- found only if `with_loader_symbol`.
+
+    Returns the ELF and the addresses in it.
+    """
+    rodata, offsets = _pack_rodata((*decoy_strings, needle))
+
+    MAIN_LEN = 5 + n_log + n_loader + extra_once   # stp, adrp, add, the calls, ldp, ret
+    CALLEE_LEN = 3
+    PLT_LEN = 3
+    n_callees = 2 + extra_once                     # the logger, the loader, the extras
+    n_insn = (MAIN_LEN + n_callees * CALLEE_LEN
+              + (PLT_LEN + CALLEE_LEN if loader_via_plt else 0)
+              + (CALLEE_LEN if with_jdiv else 0))
+    text_vaddr, rodata_vaddr = _layout(n_insn)
+    needle_at = rodata_vaddr + offsets[bytes(needle)]
+
+    at = text_vaddr + MAIN_LEN * 4
+    log_at, at = at, at + CALLEE_LEN * 4
+    loader_body_at, at = at, at + CALLEE_LEN * 4
+    extra_at = []
+    for _ in range(extra_once):
+        extra_at.append(at)
+        at += CALLEE_LEN * 4
+    plt_at = at if loader_via_plt else 0
+    real_loader_at = (plt_at + PLT_LEN * 4) if loader_via_plt else loader_body_at
+    loader_target = plt_at if loader_via_plt else loader_body_at
+
+    words: list[int] = []
+    pc = text_vaddr
+
+    def put(word):
+        nonlocal pc
+        words.append(word)
+        pc += 4
+
+    put(STP_FP_LR)
+    put(adrp(0, pc, needle_at))
+    put(add_imm(0, 0, needle_at & 0xFFF))
+    for _ in range(n_loader):
+        put(bl(pc, loader_target))
+    for a in extra_at:
+        put(bl(pc, a))
+    for _ in range(n_log):                       # one log call per way the load can fail
+        put(bl(pc, log_at))
+    put(LDP_FP_LR)
+    put(ret())
+
+    for _ in range(n_callees):                   # the logger, the loader, the extras
+        put(STP_FP_LR)
+        put(LDP_FP_LR)
+        put(ret())
+    if loader_via_plt:
+        put(adrp(16, pc, real_loader_at))        # the hop through x16 is what marks a PLT stub
+        put(ldr_x(16, 16, 0))
+        put(br(16))
+        put(STP_FP_LR)                           # the real luaL_loadbufferx behind it
+        put(LDP_FP_LR)
+        put(ret())
+
+    jdiv_at = pc if with_jdiv else 0
+    if with_jdiv:
+        put(STP_FP_LR)
+        put(LDP_FP_LR)
+        put(ret())
+
+    assert len(words) == n_insn, (len(words), n_insn)
+    text = b"".join(struct.pack("<I", w) for w in words)
+
+    # No luaL_loadbuffer symbol unless asked for: a lib that still exports it needs none of this.
+    syms = {LUA_BRIDGE: text_vaddr, "_ZN7cocos2d8LuaStack13luaLoadBufferEP9lua_State": text_vaddr}
+    if with_jdiv:
+        syms["__divdi3_jdiv"] = jdiv_at
+    syms["_ZN7cocos2d3logEPKcz"] = log_at
+    if with_loader_symbol:
+        syms["luaL_loadbufferx"] = real_loader_at
+
+    layout = {"load_fn": text_vaddr, "loader": loader_target, "loader_real": real_loader_at,
+              "logger": log_at, "extras": extra_at, "needle_at": needle_at, "jdiv": jdiv_at}
+    return _assemble(text, rodata, syms, text_vaddr, rodata_vaddr), layout
+
+
 if __name__ == "__main__":
     import sys
     blob = build(b"cocos2d_lua_js", b"LJ",

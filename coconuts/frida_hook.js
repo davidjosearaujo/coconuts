@@ -3,6 +3,7 @@
 var COCOS_SYMBOL = __COCOS_SYMBOL__;
 var DUMP_OFFSET  = __DUMP_OFFSET__;
 var KEY_OFFSET   = __KEY_OFFSET__;
+var LUA_LOAD_OFFSET = __LUA_LOAD_OFFSET__;  // luaL_loadbuffer, when r2 had to find it without a symbol
 var KEY_IS_STD_STRING = __KEY_IS_STD_STRING__;
 
 var MAX_KEY_LEN   = 64;
@@ -510,6 +511,60 @@ function readLuaKeyAndSign(args) {
     return {key: key, sign: readCharsAndLen(args[3], args[4])};
 }
 
+// LuaStack::setXXTEAKeyAndSign sits at vtable slot 29. cocos2d::Ref declares exactly one virtual
+// member (its destructor) and LuaStack declares 30 more in a fixed order, which after the two
+// destructor entries the Itanium ABI emits puts the setter at +0xe8 with 64-bit pointers and
+// +0x74 with 32-bit ones. Confirmed by clang on arm64 against the fixture libraries.
+var VTABLE_SETKEY_SLOT = 29;
+
+// Reaching the key when the setter has been stripped from the symbol table. Hooks the *return*
+// of LuaEngine::getLuaStack and reads the slot out of the instance it hands back, rather than
+// calling getInstance from here -- that would construct the engine earlier than the game expects.
+//
+// A wrong slot does not merely miss the key: it attaches a trampoline to whatever virtual method
+// is there, which may be in the game's hot path. So every pointer is checked to be what it should
+// be before anything is attached, and the key is only reported if the arguments look like one.
+function hookKeySetterViaVtable(lib, idx) {
+    var getLuaStack = idx.firstMatching([['LuaEngine', 'getLuaStack']], true);
+    if (getLuaStack === null) return false;
+
+    var base = lib.base;
+    var end = lib.base.add(lib.size);
+    var inLib = function (p) {
+        return p !== null && !p.isNull() && p.compare(base) >= 0 && p.compare(end) < 0;
+    };
+    var done = false;
+
+    return safeAttach('LuaEngine::getLuaStack (vtable probe)', getLuaStack, {
+        onLeave: function (retval) {
+            if (done || keySent) return;
+            try {
+                var stack = ptr(retval);
+                if (stack.isNull()) return;
+                // The instance is on the heap, but the vtable it points at belongs to this
+                // library, and so does the method in the slot. Anything else is not a LuaStack.
+                var vtable = stack.readPointer();
+                if (!inLib(vtable)) return;
+                var slot = vtable.add(VTABLE_SETKEY_SLOT * Process.pointerSize).readPointer();
+                if (!inLib(slot)) return;
+                // Reject the slot only when we positively know it isn't code; a runtime that
+                // can't answer must not silently disable the fallback.
+                var range = Process.findRangeByAddress ? Process.findRangeByAddress(slot) : null;
+                if (range && range.protection.indexOf('x') === -1) return;
+
+                done = true;   // one attempt, whether or not the hook takes
+                if (attachKeyHook('LuaStack::setXXTEAKeyAndSign (vtable slot '
+                                  + VTABLE_SETKEY_SLOT + ')', slot, readLuaKeyAndSign)) {
+                    logMsg('info', 'Key setter was stripped; hooked it through the LuaStack '
+                                   + 'vtable at ' + slot + '.');
+                }
+            } catch (e) {
+                logMsg('debug', 'vtable probe: ' + e);
+            }
+        }
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Installation
 // ---------------------------------------------------------------------------
@@ -542,6 +597,14 @@ function installHooks(lib) {
     // chunk name plus a hash of the body.
     var luaLoadAddrs = idx.allExact(['luaL_loadbufferx', 'luaL_loadbuffer']);
 
+    // A lib that hides the loader from its symbol table leaves nothing to match, so fall back to
+    // the address r2 worked out from the strings LuaStack::luaLoadBuffer logs. Only a fallback:
+    // where the symbols exist they name both entry points, and r2 can only point at the one.
+    if (luaLoadAddrs.length === 0 && LUA_LOAD_OFFSET !== null) {
+        luaLoadAddrs = [base.add(LUA_LOAD_OFFSET)];
+        logMsg('info', 'No luaL_loadbuffer symbol; using the statically resolved loader.');
+    }
+
     var luaHooks = 0;
     for (var li = 0; li < luaLoadAddrs.length; li++) {
         if (hookLuaLoadBuffer(luaLoadAddrs[li])) luaHooks++;
@@ -565,6 +628,7 @@ function installHooks(lib) {
 
     var luaKeyExp = idx.firstMatching([['LuaStack', 'setXXTEAKeyAndSign']], true);
     if (attachKeyHook('LuaStack::setXXTEAKeyAndSign', luaKeyExp, readLuaKeyAndSign)) attached++;
+    else if (luaKeyExp === null && hookKeySetterViaVtable(lib, idx)) attached++;
 
     // 3. AES key capture (EncryptManager::setEncryptEnabled(this, bool, string_view key,
     //    string_view ivec, int flags)). Each string_view occupies two arg slots {ptr,len};

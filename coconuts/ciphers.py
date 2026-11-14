@@ -7,6 +7,7 @@ length stored in the last 32-bit word (no PKCS#7 padding).
 
 from __future__ import annotations
 
+import collections
 import struct
 import zlib
 from typing import NamedTuple
@@ -178,32 +179,54 @@ def _xxtea_raw_decrypt(data: bytes, key16: bytes) -> bytes:
 
 
 def detect_signature_prefix(samples: list[bytes], max_len: int = 32) -> bytes:
-    """Detects a shared signature prefix (e.g. b'kkk' from setXXTEAKeyAndSign) across .jsc samples."""
-    non_empty = [s for s in samples if len(s) >= 8]
-    if not non_empty:
+    """Detects a shared signature prefix (e.g. b'kkk' from setXXTEAKeyAndSign) across samples.
+
+    The prefix is taken from the samples that agree, not from all of them. A real game ships the
+    odd file that carries no signature among scripts that all do -- an unencrypted chunk, or a
+    localisation table -- and taking the prefix common to every sample let one such file reduce it
+    to nothing, which leaves the whole game undecryptable: without the signature even the right
+    key decrypts none of it.
+    A clear majority has to agree, so a few coincidentally alike resources cannot invent a
+    signature either. Samples that are recognisably some other format are set aside first, rather
+    than the whole search giving up because the one it looked at first was a plain chunk.
+
+    The majority is strict, chosen with no counter-example to tune it against: a game that is half
+    signed and half not would still come out with no signature. If one turns up, this is the rule
+    to revisit.
+    """
+    usable = [s for s in samples
+              if len(s) >= 8
+              and not s.startswith((ZIP_MAGIC, b"\x1f\x8b") + LUA_MAGICS)
+              and s[:4] not in SPIDERMONKEY_MAGICS]
+    if len(usable) < 2:
         return b""
 
-    first = non_empty[0]
-    if first.startswith((ZIP_MAGIC, b"\x1f\x8b") + LUA_MAGICS) or first[:4] in SPIDERMONKEY_MAGICS:
+    # The largest group of samples that even begin alike. Short of a majority there is nothing
+    # here worth calling the game's signature.
+    lead, agreeing = collections.Counter(s[:1] for s in usable).most_common(1)[0]
+    if agreeing < 2 or agreeing * 2 <= len(usable):
         return b""
+    signed = [s for s in usable if s[:1] == lead]
 
+    first = signed[0]
     prefix = bytearray()
-    if len(non_empty) >= 2:
-        limit = min(max_len, min(len(s) for s in non_empty))
-        for i in range(limit):
-            b = first[i]
-            if all(s[i] == b for s in non_empty[1:]):
-                prefix.append(b)
-            else:
-                break
-        while prefix and any((len(s) - len(prefix)) % 4 != 0 for s in non_empty):
-            prefix.pop()
+    limit = min(max_len, min(len(s) for s in signed))
+    for i in range(limit):
+        b = first[i]
+        if all(s[i] == b for s in signed[1:]):
+            prefix.append(b)
+        else:
+            break
+    # XXTEA ciphertext is a whole number of 32-bit words, so a prefix leaving a remainder behind
+    # cannot all be signature.
+    while prefix and any((len(s) - len(prefix)) % 4 != 0 for s in signed):
+        prefix.pop()
 
     if not prefix:
-        rems = {len(s) % 4 for s in non_empty}
+        rems = {len(s) % 4 for s in signed}
         if len(rems) == 1:
             rem = rems.pop()
-            if rem != 0 and all(s[:rem] == first[:rem] for s in non_empty):
+            if rem != 0 and all(s[:rem] == first[:rem] for s in signed):
                 return first[:rem]
 
     return bytes(prefix)

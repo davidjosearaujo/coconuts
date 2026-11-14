@@ -105,7 +105,9 @@ function createEnv() {
         brk += 0x8000;
         const mk = (names) => (names || []).map((n, i) => ({ name: n, address: base.add(0x100 + i * 0x40) }));
         const mod = {
-            name, base,
+            // Real Frida modules carry their mapped size, and the agent uses it to tell a pointer
+            // that belongs to this library from one that doesn't (the vtable probe).
+            name, base, size: 0x8000,
             _exports: mk(spec.exports),
             _symbols: mk(spec.symbols),
             enumerateExports() { enumExportCalls++; return this._exports; },

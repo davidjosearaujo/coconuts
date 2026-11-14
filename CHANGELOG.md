@@ -7,22 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Verified against a real game
+### Verified against real games
 
-Run against a shipped Cocos2d-x Lua game (Happy Teen Patti 1005, arm64, LuaJIT
-2.1 GC64) on a Pixel 7 / Android 13. The Frida side came through intact: the
-loader hook resolved `luaL_loadbuffer` and `luaL_loadbufferx` from the export
-table through `do_dlopen`, and **all 508 chunks it dumped are byte-identical to
-the ones extracted from the APK offline** — chunk capture, the unknown-length
-walk and the module-name output all agreeing with ground truth. The key hook
-captured the game's XXTEA key (`setXXTEAKeyAndSign`) even though this game's
-scripts aren't encrypted, so the key belongs to its other assets.
+**Happy Teen Patti 1005** (arm64, LuaJIT 2.1 GC64) on a Pixel 7 / Android 13.
+The Frida side came through intact: the loader hook resolved `luaL_loadbuffer`
+and `luaL_loadbufferx` from the export table through `do_dlopen`, and **all 508
+chunks it dumped are byte-identical to the ones extracted from the APK offline**
+— chunk capture, the unknown-length walk and the module-name output all agreeing
+with ground truth. The key hook captured an XXTEA key even though this game's
+scripts aren't encrypted, so that key belongs to its other assets.
 
-Two defects came out of it, both fixed below. Still unverified: a real game whose
-scripts *are* encrypted, which is what would exercise the static key search and
-the verification of a captured key (see TODO.md).
+**An encrypted Cocos2d-x Lua game** (`com.ksrgland.goat`, `libcocos2dlua.so`,
+40 MB, NDK r21e, 4265 `.luac` under signature `LAKYSIGN`) covered the half the
+first game couldn't, spawned on the same Pixel 7. End to end:
+
+- `choose_signature` learns `LAKYSIGN` from the game's own assets, no `--sign`.
+- The key hook captured the game's XXTEA key at runtime, and
+  `verify_captured_key` confirmed it against real encrypted scripts before it was
+  trusted.
+- The offline pass then decrypted **4078 of 4079** encrypted assets, 1758 live
+  dumps arrived alongside, and nothing was left in `raw_scripts/`.
+- Decrypting the APK independently with the captured key and diffing against the
+  live dumps: **4265 of 4265 byte-identical, none differing.** What the tool
+  produces offline is exactly what the running game loaded.
+
+It also showed a game the static search cannot solve, and shouldn't pretend to:
+`setXXTEAKeyAndSign` is exported, but `LAKYSIGN` appears nowhere in the engine
+library, nor in any of the APK's 2422 `.so`/`.dex`/`.lua`/`.json`/`.xml` entries.
+The key is assembled at runtime, so both static tiers return `None` in seconds
+rather than guessing or hanging — which is why the Frida track exists.
+
+Four defects came out of the two games, all fixed below.
 
 ### Fixed
+
+- **Translated Lua source was taken for ciphertext, and hid a whole game's
+  signature.** `str.isprintable()` is false for every space but ASCII's and for
+  the format characters that come with translated text, so a localisation table
+  full of no-break spaces (6157 of them in one real game), zero-width spaces,
+  ideographic spaces or a stray BOM was classed as encrypted. 71 of one game's
+  600 sampled scripts landed on the wrong side. Because those files share no
+  prefix with the genuinely encrypted ones, the signature every encrypted script
+  carried stopped being detectable at all: `detect_signature_prefix` returned
+  `b''` and nothing could be decrypted even given the right key. Unicode
+  whitespace and format characters now count as text; control characters, which
+  is what ciphertext decodes to when it decodes at all, still do not.
+- **One odd file could hide a signature every other script carried.**
+  `detect_signature_prefix` took the prefix common to *every* sample, so a single
+  file carrying no signature — an unencrypted chunk, a localisation table —
+  reduced it to nothing, and without the signature even the right key decrypts
+  nothing. The prefix now comes from the samples that agree, with a clear
+  majority required so a few coincidentally alike resources can't invent one, and
+  samples that are recognisably some other format are set aside first rather than
+  the whole search giving up because the one it looked at first was a plain chunk.
 
 - **A real bundle's entries were all dropped, reporting no scripts at all.**
   `loadChunksFromZIP` registers each entry under its own name with the extension
@@ -42,10 +79,13 @@ the verification of a captured key (see TODO.md).
   dropped as duplicates: the run then wrote 32-bit bytecode for a 64-bit device
   without saying so. Each copy is now kept under its own bundle's path
   (`res/game64/app.MyApp.luac`) when the bytes differ, identical copies are still
-  written once, and the flavour report names both. A pair of bundles *encrypted as
-  a whole* (`game32.bin` / `game64.bin`) is still collapsed to one arch, as it was
-  before: those are decrypted and written one asset at a time, so neither knows
-  about the other. See TODO.md.
+  written once, and the flavour report names both. Bundles encrypted *as a whole*
+  (`game32.bin` / `game64.bin`) now keep both copies too: they are only a pair
+  once both have been decrypted, so they are collected during the decrypt pass and
+  written after it, where the clash can be seen. One rule resolves the names for
+  every bundle, plain or encrypted, and an entry whose name is already taken by
+  different bytes — by a live dump, or by a bundle the other pass flattened — is
+  kept under its own bundle instead of disappearing into "already there".
 - `output_name` puts a `.luac` on a decrypted Lua chunk whose name says nothing,
   the way it already named SpiderMonkey bytecode `.mozjs.jsc`, and
   `is_plain_script` judges a file by what it holds rather than what it is called.
@@ -54,6 +94,46 @@ the verification of a captured key (see TODO.md).
   bundle mixing compiled chunks with `.lua` source or a JSON resource failed the
   whole run with "No working key found" and dumped them to `raw_scripts/`, on a
   game with no encryption anywhere.
+
+### Added
+
+- **The signature can be worked out from the assets themselves.** When nothing
+  teaches it — no `--sign`, nothing read out of the engine library, and fewer
+  than two scripts found by name to detect a shared prefix from — a bundle
+  encrypted as a whole under a name like `res/game.bin` used to be unfindable,
+  because what gives it away is the signature and the signature was the thing
+  missing. The scan is gated rather than a sweep: only assets whose first bytes
+  match no format we recognise get a vote, and only a bounded number of those are
+  read in full. A folder of textures can't elect its magic as the signature, the
+  pass costs a 64-byte head per asset instead of a full pass over the APK, and a
+  wrong guess costs a failed key check and nothing more.
+- **The key setter can be reached through the LuaStack vtable when it is
+  stripped.** `setXXTEAKeyAndSign` sits at vtable slot 29 (`+0xe8` with 64-bit
+  pointers), and a real game strips it while still exporting
+  `LuaEngine::getLuaStack` — the configuration this rescues. The agent hooks the
+  *return* of `getLuaStack` and reads the slot out of the instance the game hands
+  back, so `getInstance` is never called from the agent and the engine isn't
+  constructed earlier than the game expects. A wrong slot would attach a
+  trampoline to whatever virtual method is there, possibly in the game's hot
+  path, so the vtable must live in the library, the slot must point into it, and
+  the range must not be known to be non-executable; anything else is refused and
+  nothing is attached. It is a fallback only, used when the symbol is absent.
+- **radare2 can find the Lua loader in a library that hides it.** The heavy
+  analysis only ever looked for `ScriptEngine`/`ScriptingCore evalString`, which a
+  Lua engine does not have, so a lib with `luaL_loadbuffer` stripped from its
+  symbol table left the agent nothing to hook. `find_lua_load_function` anchors on
+  the `[LUA ERROR] load "%s", error: …` messages, which sit inside
+  `LuaStack::luaLoadBuffer` — the one function that calls the loader — and then
+  picks the loader out by call count: the logger is called once per way the load
+  can fail, the loader exactly once. Measured against a shipped game, where
+  `luaLoadBuffer` is 184 bytes and makes five calls, one to `luaL_loadbuffer` and
+  four to `cocos2d::log`. Where that asymmetry doesn't hold the search declines
+  rather than hooking the logger by mistake.
+- The resolved Lua loader travels on its own channel (`__LUA_LOAD_OFFSET__`)
+  rather than as `dump_off`. `dump_off` feeds the `evalString` handler, which
+  reads a different argument layout, so passing the loader through it would have
+  attached the wrong handler to it. It is a fallback only: where the symbols exist
+  they name both entry points and the agent still hooks each.
 
 ## [2.1.0] - 2026-11-12
 

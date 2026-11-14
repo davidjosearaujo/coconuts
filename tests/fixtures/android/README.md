@@ -91,8 +91,10 @@ It also settled three smaller questions:
   destructor entries. `harness/luastack.h` transcribes that virtual list from the real header, so
   the engine can report the slot clang actually gave it — it prints
   `setXXTEAKeyAndSign is vtable slot 29 (+0xe8 with 64-bit pointers)` in the default-visibility
-  variants, and says the setter isn't exported in the hidden ones. A vtable-walking fallback is
-  not implemented; see TODO.md for why the numbers alone aren't reason enough.
+  variants, and says the setter isn't exported in the hidden ones. The agent walks that vtable when
+  the setter has been stripped, reading the slot off an instance `LuaEngine::getLuaStack` returns
+  rather than calling `getInstance` itself; `tests/frida_agent_test.js` covers it, including the
+  checks that refuse a vtable or a slot that doesn't belong to the library.
 - **The key hook's C-string fallback.** With `HARNESS_ZERO_LEN_KEY=1` the engine passes the key
   and signature lengths as 0, the way a fork relying on NUL-terminated strings would, and both are
   still recovered. That path was broken on a device until the `readCString` fix above.

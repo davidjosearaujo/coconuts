@@ -24,7 +24,14 @@ from coconuts.extract import (
 
 from coconuts.ciphers import LUAJIT_DECOMPILER, UNLUAC
 
-from .conftest import LUA_SOURCE, LUAJIT_CHUNK, PUC_CHUNK, encrypt_asset, write_asset_dir
+from .conftest import (
+    LUA_SOURCE,
+    LUAJIT_CHUNK,
+    PUC_CHUNK,
+    SIGN,
+    encrypt_asset,
+    write_asset_dir,
+)
 
 
 class TestSafeJoin:
@@ -100,6 +107,38 @@ class TestPlainScriptDetection:
         encrypted, plain = split_plain_scripts(entries)
         assert set(encrypted) == {"b.luac"}
         assert set(plain) == {"a.luac"}
+
+    # A real game's localisation tables are Lua source carrying these; every one of them makes
+    # str.isprintable() False, which used to class the file as encrypted.
+    @pytest.mark.parametrize("char,name", [
+        ("\u00a0", "no-break space"),        # 6157 of them in one real game
+        ("\u200b", "zero-width space"),
+        ("\u3000", "ideographic space"),
+        ("\ufeff", "byte-order mark"),
+        ("\u00ad", "soft hyphen"),
+        ("\u202f", "narrow no-break space"),
+        ("\u2009", "thin space"),
+    ])
+    def test_translated_source_is_not_mistaken_for_encrypted(self, char: str, name: str) -> None:
+        blob = f"local root = {{ greeting = 'Hallo{char}Welt' }}\nreturn root\n".encode()
+        assert is_plain_script("res/language_de.luac", blob) is True, name
+
+    def test_a_control_character_still_means_encrypted(self) -> None:
+        """Whitespace and formatting are text; control bytes are what ciphertext decodes to."""
+        assert is_plain_script("res/a.luac", b"local root = {}\x01\x02\n") is False
+
+    def test_one_translated_file_does_not_hide_the_signature(self) -> None:
+        """The failure this came from: a misclassified plaintext file shares no prefix with the
+        encrypted ones, so the signature they all carry stopped being detectable at all."""
+        from coconuts.extract import choose_signature
+        entries = {
+            "res/language_de.luac": "local root = { a = 'Hallo Welt' }\n".encode(),
+            "res/main.luac": encrypt_asset(LUAJIT_CHUNK),
+            "res/app.luac": encrypt_asset(PUC_CHUNK),
+        }
+        encrypted, plain = split_plain_scripts(entries)
+        assert set(plain) == {"res/language_de.luac"}
+        assert choose_signature(None, encrypted) == SIGN
 
 
 class TestWriteOutput:

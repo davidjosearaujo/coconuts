@@ -13,12 +13,14 @@ import io
 import logging
 import os
 import re
+import unicodedata
 import zipfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 
 from .aes import cocos_aes_decrypt
 from .ciphers import (
     LUA_MAGICS,
+    SPIDERMONKEY_MAGICS,
     ZIP_MAGIC,
     LuaBytecode,
     cocos_xxtea_decrypt,
@@ -96,6 +98,19 @@ def lua_live_name(chunk_name: str, body: bytes) -> str:
     return output_name(name, "luabytecode" if body.startswith(LUA_MAGICS) else "raw")
 
 
+def _is_text(text: str) -> bool:
+    """True when every character is something written text contains.
+
+    str.isprintable() is False for every space but ASCII's, and for the format characters that
+    come with translated text. A real game's localisation tables are Lua source full of no-break
+    spaces (U+00A0), zero-width spaces, ideographic spaces and the odd BOM; counting those as
+    encrypted sends the whole run looking for a key, and the files that do carry the signature
+    then have nothing in common with them to detect it from. Control characters stay
+    disqualifying, which is what encrypted bytes decode to when they decode at all.
+    """
+    return all(c.isprintable() or c.isspace() or unicodedata.category(c) == "Cf" for c in text)
+
+
 def is_plain_script(rel: str, blob: bytes) -> bool:
     """True for anything shipped unencrypted that the Lua loader runs as-is: compiled bytecode or
     source text. .jsc files are always encrypted, so this is False for them.
@@ -113,7 +128,7 @@ def is_plain_script(rel: str, blob: bytes) -> bool:
         text = blob.decode("utf-8")
     except UnicodeDecodeError:
         return False
-    return bool(text) and all(c.isprintable() or c in "\t\r\n" for c in text)
+    return bool(text) and _is_text(text)
 
 
 def split_plain_scripts(entries: dict[str, bytes]) -> tuple[dict[str, bytes], dict[str, bytes]]:
@@ -225,6 +240,53 @@ def _bundle_members(blob: bytes) -> dict[str, bytes] | None:
         return None
 
 
+def _bundle_entries(
+    bundles: list[tuple[str, dict[str, bytes]]],
+) -> Iterator[tuple[str, str, bytes]]:
+    """Every entry of every script bundle, as (path to write it under, path under its own bundle,
+    its bytes).
+
+    A game that ships one bundle per ABI -- game32.zip and game64.zip, or the encrypted
+    game32.bin / game64.bin, the same modules compiled for a different word size -- carries every
+    module name in both. Neither copy is the one to drop, so a name holding different bytes in
+    another bundle is yielded once per bundle, under that bundle's own path, while a name holding
+    the same bytes everywhere is yielded once, under the plain name.
+
+    Deciding that across all the bundles at once is what makes the two copies symmetrical: one
+    bundle at a time can only write whichever came first under the plain name and namespace the
+    rest, and cannot tell a second copy from a path a live dump already claimed.
+
+    The second path is yielded alongside because not every clash is visible here: a plain bundle
+    is flattened as the scripts are collected and an encrypted one only once the key is known, so
+    those two passes never see each other's module names, and a live dump may have taken a name
+    before either. Callers fall back to it when the first path turns out to be taken.
+    """
+    first: dict[str, bytes] = {}
+    clashing: set[str] = set()
+    for _rel, members in bundles:
+        for name, member in members.items():
+            if first.setdefault(name, member) != member:
+                clashing.add(name)
+    if clashing:
+        log.info("%d module name(s) differ between the %d script bundles; keeping each bundle's "
+                 "copy under the bundle's own name.", len(clashing), len(bundles))
+
+    # The bundle's path without its extension, so same-named bundles in two directories don't
+    # collide in turn -- unless dropping the extension is itself what collides (game.zip beside
+    # game.bin), where the full path is the only name that tells the two apart.
+    stems = collections.Counter(os.path.splitext(rel)[0] for rel, _ in bundles)
+
+    seen: set[str] = set()
+    for rel, members in bundles:
+        stem = os.path.splitext(rel)[0]
+        for name, member in members.items():
+            own = f"{stem if stems[stem] == 1 else rel}/{name}"
+            out_name = own if name in clashing else name
+            if out_name not in seen:  # the same module shipped identically in two bundles: one file
+                seen.add(out_name)
+                yield out_name, own, member
+
+
 def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
     """Replaces each unencrypted .zip by the scripts inside it.
 
@@ -247,25 +309,12 @@ def _flatten_plain_bundles(entries: dict[str, bytes]) -> dict[str, bytes]:
         else:
             flat[rel] = blob
 
-    # A game that ships one bundle per ABI (game32.zip and game64.zip, the same modules compiled
-    # for a different word size) has every module name in both. Neither copy is the one to drop,
-    # so a name carrying different bytes in another bundle keeps both, under its bundle's name.
-    first: dict[str, bytes] = {}
-    clashing: set[str] = set()
-    for _rel, members in bundles:
-        for name, member in members.items():
-            if first.setdefault(name, member) != member:
-                clashing.add(name)
-    if clashing:
-        log.info("%d module name(s) differ between the %d script bundles; keeping each bundle's "
-                 "copy under the bundle's own name.", len(clashing), len(bundles))
-
-    # The bundle's whole path, so same-named bundles in two directories don't collide in turn.
-    # setdefault, so a script shipped loose keeps its own copy over a bundle's.
-    for rel, members in bundles:
-        stem = rel[:-len(BUNDLE_EXT)]
-        for name, member in members.items():
-            flat.setdefault(f"{stem}/{name}" if name in clashing else name, member)
+    # setdefault, so a script shipped loose keeps the name over a bundle's copy of it -- but a
+    # copy that differs is kept under its bundle rather than dropped on the floor.
+    for name, own, member in _bundle_entries(bundles):
+        if flat.setdefault(name, member) != member:
+            log.info("%s is also in a bundle, with different bytes; keeping both (%s).", name, own)
+            flat[own] = member
     return flat
 
 
@@ -290,6 +339,70 @@ def collect_signed_assets(index: dict[str, Asset], sign: bytes, known) -> dict[s
         if rel not in known and len(sign) < size <= MAX_SCRIPT_BYTES and read(len(sign)) == sign:
             found[rel] = read()
     return found
+
+
+# Formats an asset is likely to be when it is not an encrypted script. A folder of PNGs all share
+# their magic, and a shared prefix is exactly what the signature vote looks for, so anything
+# recognisable from its first bytes is kept out of that vote.
+RESOURCE_MAGICS = (
+    ZIP_MAGIC, b"PK\x05\x06", b"\x1f\x8b", b"BZh", b"\xfd7zXZ", b"7z\xbc\xaf",   # archives
+    b"\x89PNG", b"\xff\xd8\xff", b"GIF8", b"BM", b"DDS ", b"PKM ", b"\xabKTX",   # images
+    b"RIFF", b"OggS", b"ID3", b"fLaC", b"\x00\x00\x00",                          # media, mp4 box
+    b"%PDF", b"\x7fELF", b"dex\n", b"\xca\xfe\xba\xbe", b"\x03\x00\x08\x00",     # docs, code, axml
+) + LUA_MAGICS
+
+SIGN_SCAN_HEAD = 64            # bytes read per asset to decide whether it could be signed
+MAX_SIGN_SCAN_SAMPLES = 24     # read in full once gated; a bundle pair is two, a split game a few
+
+
+def _could_be_signed(head: bytes) -> bool:
+    """True when an asset's first bytes match no format we recognise, so it could be a script
+    under a name nothing would look at.
+
+    The gate on the signature scan. Most of a game's assets are identifiable from four bytes, and
+    letting a directory of textures into the vote would elect their magic as the signature. Text
+    is excluded the same way: a JSON or XML resource is not ciphertext. A signed script does start
+    with printable text -- the signature itself -- but what follows it is ciphertext, which is why
+    the whole head has to read as text to be dismissed.
+    """
+    if len(head) < MIN_SIGN_LEN + 8:
+        return False
+    if head.startswith(RESOURCE_MAGICS) or head[:4] in SPIDERMONKEY_MAGICS:
+        return False
+    try:
+        text = head.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return not _is_text(text)
+
+
+def detect_signature_in_assets(index: dict[str, Asset], known) -> bytes:
+    """The script signature, worked out from the assets themselves.
+
+    The last resort for a game that teaches it nowhere else: no `--sign`, nothing read out of the
+    engine library, and fewer than two scripts found by name to detect a shared prefix from. An
+    encrypted bundle can be called anything and what gives it away is the signature -- but the
+    signature is the very thing missing, so it has to come from the files.
+
+    Gated rather than a sweep: only assets whose first bytes match no known format get a vote, and
+    only a bounded number of those are read in full. So the pass costs a 64-byte head per asset
+    instead of a whole pass over the APK, and a wrong guess costs a failed key check, nothing more.
+    """
+    candidates: list[bytes] = []
+    for rel, (size, read) in sorted(index.items()):
+        if rel in known or not (MIN_SIGN_LEN < size <= MAX_SCRIPT_BYTES):
+            continue
+        if _could_be_signed(read(SIGN_SCAN_HEAD)):
+            candidates.append(read())
+            if len(candidates) >= MAX_SIGN_SCAN_SAMPLES:
+                break
+    if len(candidates) < 2:
+        return b""
+    sign = detect_signature_prefix(candidates)
+    if len(sign) < MIN_SIGN_LEN:
+        return b""
+    log.info("Signature %r worked out from %d unrecognised asset(s).", sign, len(candidates))
+    return sign
 
 
 def collect_scripts(apk_paths: list[str], logger: logging.Logger = log,
@@ -377,8 +490,9 @@ WRITTEN, SKIPPED, FAILED = "written", "skipped", "failed"
 def write_output(out_dir: str, rel: str, body: bytes, report: LuaBytecodeReport | None = None) -> str:
     """Writes one decrypted/copied file into the output tree.
 
-    Returns WRITTEN, SKIPPED (a live dump already claimed the path and wins) or FAILED (the path
-    escapes the output directory, or the write itself failed).
+    Returns WRITTEN, SKIPPED (something already holds the path and wins: a live dump, or a copy
+    of this very script placed there earlier in the run) or FAILED (the path escapes the output
+    directory, or the write itself failed).
     """
     try:
         out_path = safe_join(out_dir, rel)
@@ -412,15 +526,17 @@ def _write_plain_scripts(plain: dict[str, bytes], out_dir: str, report: LuaBytec
     return copied
 
 
-def _write_bundle(out_dir: str, members: dict[str, bytes], sign: bytes,
-                  decrypt: Callable[[bytes], bytes | None], report: LuaBytecodeReport) -> list[str]:
-    """Writes the files of a script bundle into the output tree, one result each.
+def _write_bundles(out_dir: str, entries: Iterable[tuple[str, str, bytes]], sign: bytes,
+                   decrypt: Callable[[bytes], bytes | None], report: LuaBytecodeReport) -> list[str]:
+    """Writes the entries of the script bundles into the output tree, one result each.
 
+    `entries` pairs each entry with the path to write it under, which is the job of
+    _bundle_entries: the names a bundle registers are its own and two bundles can share them.
     An entry starting with the signature is encrypted (LuaStack::luaLoadBuffer decrypts those
     whatever holds them) and is decrypted here; anything else is written as it is.
     """
     results: list[str] = []
-    for name, blob in sorted(members.items()):
+    for name, own, blob in sorted(entries):
         if sign and blob.startswith(sign):
             blob = decrypt(blob)
             if blob is None:
@@ -428,26 +544,48 @@ def _write_bundle(out_dir: str, members: dict[str, bytes], sign: bytes,
                 results.append(FAILED)
                 continue
         elif not is_script_member(name, blob):
-            results.append(write_output(out_dir, name, blob, report))  # a resource, not a script
+            results.append(_write_member(out_dir, name, own, blob, report))  # a resource
             continue
         body, kind = unpack_payload(blob)
-        results.append(write_output(out_dir, output_name(name, kind), body, report))
+        results.append(_write_member(out_dir, output_name(name, kind),
+                                     output_name(own, kind), body, report))
     return results
 
 
-def _write_payload(out_dir: str, rel: str, plain: bytes, sign: bytes,
-                   decrypt: Callable[[bytes], bytes | None], report: LuaBytecodeReport) -> list[str]:
-    """Writes one decrypted script; a script bundle (a zip) is unpacked into its entries instead."""
-    body, kind = unpack_payload(plain)
-    if kind == "zip":
-        # Only a zip of scripts is a bundle. A Creator "zip compress" build also wraps a script in
-        # a zip, but that one holds a single .js that isn't named after the file it came from, so
-        # unpacking it would lose the name: it is kept as a .zip instead.
-        members = _bundle_members(body)
-        if members:
-            log.info("%s is a script bundle: unpacking %d file(s).", rel, len(members))
-            return _write_bundle(out_dir, members, sign, decrypt, report)
-    return [write_output(out_dir, output_name(rel, kind), body, report)]
+def _write_member(out_dir: str, rel: str, own: str, body: bytes,
+                  report: LuaBytecodeReport) -> str:
+    """Writes one bundle entry, under its own bundle's path if the plain name is already taken by
+    different bytes.
+
+    Whatever got there first keeps the name: a live dump is the arch the game really ran, and a
+    script shipped loose is the one the engine would have loaded. What must not happen is the
+    second copy vanishing into write_output's "already there" -- that is a different module with
+    the same name, and the bundle it came from is what tells the two apart.
+    """
+    result = write_output(out_dir, rel, body, report)
+    if result != SKIPPED or own == rel:
+        return result
+    with contextlib.suppress(OSError, ValueError):
+        with open(safe_join(out_dir, rel), "rb") as f:
+            if f.read() == body:
+                return result  # the same bytes already there, from a live dump or another bundle
+    log.info("%s is already there with different bytes; keeping this copy as %s.", rel, own)
+    return write_output(out_dir, own, body, report)
+
+
+def _decrypted_bundle(rel: str, body: bytes, kind: str) -> dict[str, bytes] | None:
+    """The entries of a decrypted payload that turned out to be a script bundle, else None.
+
+    Only a zip of scripts is a bundle. A Creator "zip compress" build also wraps a script in a
+    zip, but that one holds a single .js that isn't named after the file it came from, so
+    unpacking it would lose the name: it is kept as a .zip instead.
+    """
+    if kind != "zip":
+        return None
+    members = _bundle_members(body)
+    if members:
+        log.info("%s is a script bundle: unpacking %d file(s).", rel, len(members))
+    return members
 
 
 def _extract_offline_aes(stack: contextlib.ExitStack, apk_paths: list[str],
@@ -559,6 +697,14 @@ def extract_offline(
 
         if forced_sign or exact_sign:
             add_signed_assets(forced_sign or exact_sign)
+        elif len(entries) < 2:
+            # Too few scripts found by name to detect a shared prefix from, and no signature
+            # given: the only thing left that can teach it is the assets themselves. This is what
+            # finds a bundle encrypted as a whole under a name nothing would have looked at.
+            discovered = detect_signature_in_assets(asset_index(), known)
+            if discovered:
+                exact_sign = discovered
+                add_signed_assets(discovered)
         if not entries and not plain:  # nothing by name, and no signature to find anything by
             log.warning("No .jsc / .luac / .lua files found in %d input path(s).", len(apk_paths))
             return 0
@@ -602,20 +748,31 @@ def extract_offline(
 
         log.info("Decrypting %d asset(s) into '%s' with %s...", len(entries), out_dir, cipher_desc)
         results: collections.Counter[str] = collections.Counter()
+        bundles: list[tuple[str, dict[str, bytes]]] = []
         for rel, raw_blob in sorted(entries.items()):
             plain = decrypt(raw_blob)
             if plain is None:
                 results[FAILED] += 1
                 log.debug("Decryption failed: %s", rel)
                 continue
-            results.update(_write_payload(out_dir, rel, plain, sign, decrypt, report))
+            body, kind = unpack_payload(plain)
+            members = _decrypted_bundle(rel, body, kind)
+            if members is not None:
+                bundles.append((rel, members))  # written below, once they can all be seen at once
+                continue
+            results[write_output(out_dir, output_name(rel, kind), body, report)] += 1
+
+        # After the pass: a pair of bundles encrypted whole, one per ABI, only becomes visible as
+        # a pair once both have been decrypted, and writing the first one early would put it under
+        # the plain module names and leave the second with nowhere to go.
+        results.update(_write_bundles(out_dir, _bundle_entries(bundles), sign, decrypt, report))
         written, skipped, failed = results[WRITTEN], results[SKIPPED], results[FAILED]
 
         if failed and not (written or skipped):
             log.error("Every file failed to decrypt; the key is probably wrong for these assets.")
             save_raw_fallback(entries, out_dir)
             return written + copied
-        log.log(SUCCESS, "Done: %d file(s) decrypted to %s, %d skipped (already dumped live).",
+        log.log(SUCCESS, "Done: %d file(s) decrypted to %s, %d skipped (already there).",
                 written, out_dir, skipped)
         report.log()
         if failed:

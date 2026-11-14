@@ -307,14 +307,16 @@ def main(argv=None) -> int:
                 if key is None and not static_won.is_set():
                     try:
                         import frida
-                        cocos_symbol, dump_off, key_off, key_is_std_string = resolve_frida_targets(
+                        (cocos_symbol, dump_off, key_off, key_is_std_string,
+                         lua_load_off) = resolve_frida_targets(
                             lib_path, abort_event=static_won, high_prob_done=high_prob_done
                         )
                         if not static_won.is_set():
                             device = frida.get_device(serial, timeout=5) if serial else frida.get_usb_device(timeout=5)
                             serial = device.id
                             script_src = build_frida_script(
-                                cocos_symbol, dump_off, key_off, key_is_std_string=key_is_std_string
+                                cocos_symbol, dump_off, key_off,
+                                key_is_std_string=key_is_std_string, lua_load_off=lua_load_off
                             )
                             if not static_won.is_set():
                                 dyn_key = run_frida_race(

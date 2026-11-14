@@ -109,7 +109,7 @@ class TestStaticTrackOnRealLibraries:
     def test_resolves_the_key_function_from_the_symbol_table(self, runtime: str) -> None:
         from coconuts.frida_dump import resolve_frida_targets
 
-        cocos_symbol, dump_off, key_off, is_std_string = resolve_frida_targets(
+        cocos_symbol, dump_off, key_off, is_std_string, lua_load_off = resolve_frida_targets(
             str(lib_path(runtime, "default-unstripped")))
         assert cocos_symbol == BRIDGE
         assert key_off, "xxtea_decrypt is an export here, so it must resolve"
@@ -117,6 +117,7 @@ class TestStaticTrackOnRealLibraries:
         # There is no ScriptEngine::evalString in a Lua lib: the agent resolves the Lua loader
         # itself, which is exactly why dump_off being None must not disable Lua dumping.
         assert dump_off is None
+        assert lua_load_off, "luaL_loadbuffer is an export here, so it resolves on its own channel"
 
     def test_a_stripped_lua_library_still_identifies(self, runtime: str) -> None:
         """The JNI bridge is an export, so identification survives --strip-all."""

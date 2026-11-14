@@ -48,6 +48,30 @@ class TestSignatureDetection:
     def test_plain_bytecode_is_not_mistaken_for_a_signature(self) -> None:
         assert detect_signature_prefix([LUAJIT_CHUNK, LUAJIT_CHUNK]) == b""
 
+    def test_one_unsigned_file_does_not_hide_the_signature(self) -> None:
+        """The real failure this came from: a game ships a localisation table in plain Lua among
+        scripts that all carry the signature. Taking the prefix common to every sample let that
+        one file reduce it to nothing, and without the signature nothing decrypts at all."""
+        samples = [encrypt_asset(LUA_SOURCE), encrypt_asset(LUAJIT_CHUNK),
+                   encrypt_asset(PUC_CHUNK), b"local root = { a = 'Hallo' }\n"]
+        assert detect_signature_prefix(samples) == SIGN
+
+    def test_a_plain_chunk_first_does_not_abort_the_search(self) -> None:
+        """It used to look only at the first sample to decide the whole list was unsigned."""
+        samples = [LUAJIT_CHUNK, encrypt_asset(LUA_SOURCE), encrypt_asset(PUC_CHUNK),
+                   encrypt_asset(LUAJIT_CHUNK)]
+        assert detect_signature_prefix(samples) == SIGN
+
+    def test_a_signature_needs_a_majority(self) -> None:
+        """Half the samples agreeing is not a game's signature, it is a coincidence."""
+        samples = [encrypt_asset(LUA_SOURCE), encrypt_asset(PUC_CHUNK),
+                   b"AAAA" + b"\x11" * 12, b"BBBB" + b"\x22" * 12]
+        assert detect_signature_prefix(samples) == b""
+
+    def test_two_lookalike_resources_do_not_invent_one(self) -> None:
+        samples = [b"RIFFxxxxWAVE1234", b"RIFFyyyyWAVE5678"]
+        assert detect_signature_prefix(samples) in (b"", b"RIFF")  # never a longer invention
+
 
 class TestUnpackPayload:
     @pytest.mark.parametrize("blob,kind", [

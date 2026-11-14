@@ -26,6 +26,16 @@ DECRYPT_FAIL_NEEDLES = [
     "Can't decrypt code for",
 ]
 
+# Strings used to locate the Lua loader in a stripped libcocos2dlua.so. LuaStack::luaLoadBuffer
+# logs one of these per way luaL_loadbuffer can fail, so they are referenced from inside the one
+# function that calls it. Verified live in a shipped arm64 game (Happy Teen Patti 1005): all four
+# are referenced from 0x7685ec..0x768628, inside luaLoadBuffer at 0x768590.
+LUA_LOAD_NEEDLES = [
+    '[LUA ERROR] load "%s", error:',
+    "error: syntax error during pre-compilation.",
+    "error: memory allocation error.",
+]
+
 # Empirical: in the builds this tool was developed against, the 13th `bl` inside the
 # "Can't decrypt code for %s" function is the call to xxtea_decrypt. This depends on the
 # Cocos version, hence the xref-count fallback in find_key_function().
@@ -192,15 +202,54 @@ def find_string_xref_function(r2, strings, needles: str | list[str]) -> int:
     raise RuntimeError(f"No function references {needles[0]!r}")
 
 
+def _function_calls(r2, fn: int) -> list[int]:
+    """The `bl` targets of a function, in order, with repeats kept."""
+    ops = (r2.cmdj(f"pdfj @ {fn:#x}") or {}).get("ops", [])
+    return [op["jump"] for op in ops
+            if op.get("jump") and op.get("disasm", "").split(None, 1)[:1] == ["bl"]]
+
+
+def find_lua_load_function(r2, strings, symbols) -> int:
+    """The address of luaL_loadbuffer in a Lua engine lib, found without its symbol.
+
+    LuaStack::luaLoadBuffer is short and calls exactly two things: luaL_loadbuffer once, and the
+    logger once for each way the load can fail. That asymmetry is what identifies the loader,
+    rather than a call index that moves with the Cocos version: the target called exactly once is
+    luaL_loadbuffer, the one called repeatedly is cocos2d::log.
+
+    Measured on a shipped arm64 game: luaLoadBuffer is 184 bytes and makes 5 calls -- 1 to
+    luaL_loadbuffer, 4 to cocos2d::log, one per error string in LUA_LOAD_NEEDLES' switch.
+    """
+    fn = find_string_xref_function(r2, strings, LUA_LOAD_NEEDLES)
+    calls = _function_calls(r2, fn)
+    if not calls:
+        raise RuntimeError("No `bl` calls found in the Lua load function")
+
+    counts = {t: calls.count(t) for t in dict.fromkeys(calls)}
+    once = [t for t, c in counts.items() if c == 1]
+    if len(once) != 1:
+        raise RuntimeError(
+            f"Cannot tell the loader from the logger in the Lua load function at {fn:#x}: "
+            f"{len(once)} of its {len(counts)} call target(s) are called exactly once")
+
+    target = once[0]
+    head = r2.cmd(f"pd 4 @ {target:#x}")
+    if "x16" in head or "x17" in head:  # PLT stub -> resolve the real symbol
+        sym = find_symbol_vaddr(symbols, [r"luaL_loadbufferx?$"])
+        if sym:
+            return sym
+        flog.warning("The Lua loader looks like a PLT stub and no luaL_loadbuffer symbol was "
+                     "found; hooking the stub.")
+    return target
+
+
 def _xref_count(r2, addr: int) -> int:
     return len(r2.cmdj(f"axtj @ {addr:#x}") or [])
 
 
 def find_key_function(r2, strings, symbols) -> int:
     fn = find_string_xref_function(r2, strings, DECRYPT_FAIL_NEEDLES)
-    ops = (r2.cmdj(f"pdfj @ {fn:#x}") or {}).get("ops", [])
-    calls = [op["jump"] for op in ops
-             if op.get("jump") and op.get("disasm", "").split(None, 1)[:1] == ["bl"]]
+    calls = _function_calls(r2, fn)
     if not calls:
         raise RuntimeError("No `bl` calls found in the decrypt-failure function")
 
