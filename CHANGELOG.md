@@ -37,7 +37,14 @@ library, nor in any of the APK's 2422 `.so`/`.dex`/`.lua`/`.json`/`.xml` entries
 The key is assembled at runtime, so both static tiers return `None` in seconds
 rather than guessing or hanging — which is why the Frida track exists.
 
-Four defects came out of the two games, all fixed below.
+**A Cocos2d-JS game** (Top War, `com.topwar.gp`, `libcocos2djs.so`, 7 `.jsc`) was
+run as a regression check on the JS side after the Lua work touched shared code.
+The static track found its XXTEA key as candidate #1 of 27629 (`--key` with that
+value gives identical output), Frida captured the same key through
+`xxtea_decrypt` and `setXXTeaKey` with `evalString` hooked, and the 7 statically
+decrypted files are byte-identical to the 7 the running game evaluated.
+
+Four defects came out of the Lua games, all fixed below.
 
 ### Fixed
 
