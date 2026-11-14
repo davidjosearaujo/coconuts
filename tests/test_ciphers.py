@@ -68,6 +68,12 @@ class TestSignatureDetection:
                    b"AAAA" + b"\x11" * 12, b"BBBB" + b"\x22" * 12]
         assert detect_signature_prefix(samples) == b""
 
+    def test_a_single_script_still_yields_its_signature(self) -> None:
+        """A game with one encrypted script has nothing to share a prefix with, but the length
+        left over once whole 32-bit words are taken away still gives the signature up."""
+        sample = b"kkk" + bytes(range(8, 48))      # 43 bytes: 3 left over after the words
+        assert detect_signature_prefix([sample]) == b"kkk"
+
     def test_two_lookalike_resources_do_not_invent_one(self) -> None:
         samples = [b"RIFFxxxxWAVE1234", b"RIFFyyyyWAVE5678"]
         assert detect_signature_prefix(samples) in (b"", b"RIFF")  # never a longer invention

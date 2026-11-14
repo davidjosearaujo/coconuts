@@ -198,29 +198,32 @@ def detect_signature_prefix(samples: list[bytes], max_len: int = 32) -> bytes:
               if len(s) >= 8
               and not s.startswith((ZIP_MAGIC, b"\x1f\x8b") + LUA_MAGICS)
               and s[:4] not in SPIDERMONKEY_MAGICS]
-    if len(usable) < 2:
+    if not usable:
         return b""
 
-    # The largest group of samples that even begin alike. Short of a majority there is nothing
-    # here worth calling the game's signature.
-    lead, agreeing = collections.Counter(s[:1] for s in usable).most_common(1)[0]
-    if agreeing < 2 or agreeing * 2 <= len(usable):
-        return b""
-    signed = [s for s in usable if s[:1] == lead]
+    signed = usable
+    if len(usable) >= 2:
+        # The largest group of samples that even begin alike. Short of a majority there is
+        # nothing here worth calling the game's signature.
+        lead, agreeing = collections.Counter(s[:1] for s in usable).most_common(1)[0]
+        if agreeing < 2 or agreeing * 2 <= len(usable):
+            return b""
+        signed = [s for s in usable if s[:1] == lead]
 
     first = signed[0]
     prefix = bytearray()
-    limit = min(max_len, min(len(s) for s in signed))
-    for i in range(limit):
-        b = first[i]
-        if all(s[i] == b for s in signed[1:]):
-            prefix.append(b)
-        else:
-            break
-    # XXTEA ciphertext is a whole number of 32-bit words, so a prefix leaving a remainder behind
-    # cannot all be signature.
-    while prefix and any((len(s) - len(prefix)) % 4 != 0 for s in signed):
-        prefix.pop()
+    if len(signed) >= 2:   # one sample has nothing to share a prefix with
+        limit = min(max_len, min(len(s) for s in signed))
+        for i in range(limit):
+            b = first[i]
+            if all(s[i] == b for s in signed[1:]):
+                prefix.append(b)
+            else:
+                break
+        # XXTEA ciphertext is a whole number of 32-bit words, so a prefix leaving a remainder
+        # behind cannot all be signature.
+        while prefix and any((len(s) - len(prefix)) % 4 != 0 for s in signed):
+            prefix.pop()
 
     if not prefix:
         rems = {len(s) % 4 for s in signed}
