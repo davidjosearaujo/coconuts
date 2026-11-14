@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-11-14
+
+### Changed
+
+- `frida_dump.resolve_frida_targets` returns a fifth value, the Lua loader offset
+  (`lua_load_off`), and `build_frida_script` takes it as an optional
+  `lua_load_off` argument. Code unpacking the four-value result needs updating;
+  the command line is unchanged.
+
 ### Verified against real games
 
 **Happy Teen Patti 1005** (arm64, LuaJIT 2.1 GC64) on a Pixel 7 / Android 13.
@@ -411,7 +420,8 @@ Cocos Creator Android games and dumps their decrypted JavaScript.
   PCs, usage, output, troubleshooting and limitations; the MIT license and the
   coconut logo.
 
-[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.1.0...HEAD
+[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v3.0.0...HEAD
+[3.0.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.1.0...v3.0.0
 [2.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.1...v2.1.0
 [2.0.1]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.0...v2.0.1
 [2.0.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v1.1.0...v2.0.0
