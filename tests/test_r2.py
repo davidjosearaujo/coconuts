@@ -330,3 +330,83 @@ class TestFindKeyFunction:
         with analysed(tmp_path, n_calls=0, key_call_index=-1) as (r2, strings, syms, _layout):
             with pytest.raises(RuntimeError, match="No `bl` calls"):
                 find_key_function(r2, strings, syms)
+
+
+class TestDeepAnalysis:
+    """`--deep-analysis` (force_heavy) runs the full analysis even when a fast path already
+    answered. The .data.rel.ro slot is the fast path that matters: it accepts any pointer into
+    code, so a slot holding some unrelated method passes for setXXTeaKey and, without the flag,
+    nothing ever second-guesses it."""
+
+    WRONG = 0x1234  # what a misfiring .data.rel.ro slot hands back
+
+    def lib(self, tmp_path: Path, **kw) -> tuple[str, dict]:
+        # No xxtea_decrypt symbol: an exported one is the first fast path, ahead of the slot.
+        kw = {"key_call_index": KEY_CALL, "extra_callers": {KEY_CALL: 1}, **kw}
+        blob, layout = build_decrypt_fail(with_key_symbol=False, **kw)
+        path = tmp_path / "libcocos2djs.so"
+        path.write_bytes(blob)
+        return str(path), layout
+
+    @pytest.fixture
+    def relro_misfires(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("coconuts.frida_dump._resolve_relro_set_xxtea_key",
+                            lambda _r2: self.WRONG)
+
+    def test_without_it_the_fast_path_is_trusted(self, tmp_path: Path, relro_misfires) -> None:
+        from coconuts.frida_dump import resolve_frida_targets
+        lib, _layout = self.lib(tmp_path)
+        _sym, _dump, key_off, is_std_string, _lua = resolve_frida_targets(lib)
+        assert key_off == self.WRONG and is_std_string
+
+    def test_with_it_the_full_analysis_overrides_the_fast_path(
+            self, tmp_path: Path, relro_misfires) -> None:
+        from coconuts.frida_dump import resolve_frida_targets
+        lib, layout = self.lib(tmp_path)
+        _sym, _dump, key_off, is_std_string, _lua = resolve_frida_targets(lib, force_heavy=True)
+        assert key_off == layout["callees"][KEY_CALL]
+        assert not is_std_string, "xxtea_decrypt takes raw bytes, not a std::string"
+
+    def test_a_failed_full_analysis_keeps_the_fast_path(
+            self, tmp_path: Path, relro_misfires, caplog: pytest.LogCaptureFixture) -> None:
+        """The message is there, so the analysis runs, but the function it leads to calls
+        nothing: the fast-path answer is all there is, and it is kept."""
+        from coconuts.frida_dump import resolve_frida_targets
+        lib, _layout = self.lib(tmp_path, n_calls=0, key_call_index=-1, extra_callers={})
+        with caplog.at_level("WARNING"):
+            _sym, _dump, key_off, is_std_string, _lua = resolve_frida_targets(lib, force_heavy=True)
+        assert key_off == self.WRONG and is_std_string
+        assert "keeping the one at" in caplog.text
+
+    def test_skipped_when_the_library_has_nothing_to_find(
+            self, tmp_path: Path, relro_misfires, monkeypatch: pytest.MonkeyPatch,
+            caplog: pytest.LogCaptureFixture) -> None:
+        """A Lua engine has no "Can't decrypt code" message, so the key search can't start; on a
+        real 40 MB libcocos2dlua.so the analysis took over two minutes to find that out."""
+        import coconuts.frida_dump as fd
+        heavy = []
+        real = fd.r2_open_and_analyse
+        monkeypatch.setattr(fd, "r2_open_and_analyse", lambda lib, run_heavy_analysis=False, **kw: (
+            heavy.append(run_heavy_analysis), real(lib, run_heavy_analysis=run_heavy_analysis, **kw))[1])
+        lib, _layout = self.lib(tmp_path, needle=b"nothing to do with decryption")
+        with caplog.at_level("WARNING"):
+            _sym, _dump, key_off, is_std_string, _lua = fd.resolve_frida_targets(lib, force_heavy=True)
+        assert heavy == [False], "only the light pass may run"
+        assert key_off == self.WRONG and is_std_string
+        assert "can't locate a key function here" in caplog.text
+
+
+class TestLibContainsAny:
+    def test_finds_a_needle_anywhere_in_the_file(self, tmp_path: Path) -> None:
+        from coconuts.r2 import lib_contains_any
+        path = tmp_path / "lib.so"
+        path.write_bytes(b"\0" * 5000 + b"Can't decrypt code for %s" + b"\0" * 10)
+        assert lib_contains_any(str(path), DECRYPT_FAIL_NEEDLES)
+        assert not lib_contains_any(str(path), EVAL_STRING_NEEDLES)
+
+    def test_an_unreadable_file_does_not_rule_the_search_out(self, tmp_path: Path) -> None:
+        from coconuts.r2 import lib_contains_any
+        assert lib_contains_any(str(tmp_path / "missing.so"), DECRYPT_FAIL_NEEDLES)
+        empty = tmp_path / "empty.so"
+        empty.write_bytes(b"")  # mmap refuses an empty file
+        assert lib_contains_any(str(empty), DECRYPT_FAIL_NEEDLES)

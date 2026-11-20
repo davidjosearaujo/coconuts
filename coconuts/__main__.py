@@ -89,6 +89,10 @@ def parse_args(argv=None):
     p.add_argument("--live-seconds", type=float, default=5.0,
                    help="keep the session open this long after the key to collect live dumps (default: 5)")
     p.add_argument("--static-only", action="store_true", help="skip Frida; recover the key from the lib's strings")
+    p.add_argument("--deep-analysis", action="store_true",
+                   help="always run the full radare2 analysis (aap; aaef) to find the Frida key hook, "
+                        "even when the symbol table or the .data.rel.ro slot already gave one. Slow "
+                        "(can take minutes); use it when Frida captures no key or a wrong one")
     p.add_argument("--key", help="known key (ASCII); skips key discovery")
     p.add_argument("--sign", help="explicit script header signature to strip (default: auto-detect)")
     p.add_argument("--aes-key", metavar="HEX",
@@ -198,6 +202,10 @@ def main(argv=None) -> int:
                 if not args.package and man_package:
                     args.package = man_package
                     log.info("Package name from the APK manifest: %s", man_package)
+
+            if args.deep_analysis and (args.static_only or aes is not None or key is not None):
+                log.warning("--deep-analysis only affects the Frida track, which doesn't run here; "
+                            "ignoring it.")
 
             # Case 1: Static-only mode, a known XXTEA key, or an explicit AES key — go offline directly
             if args.static_only or aes is not None or (key is not None and args.apk):
@@ -309,7 +317,8 @@ def main(argv=None) -> int:
                         import frida
                         (cocos_symbol, dump_off, key_off, key_is_std_string,
                          lua_load_off) = resolve_frida_targets(
-                            lib_path, abort_event=static_won, high_prob_done=high_prob_done
+                            lib_path, abort_event=static_won, high_prob_done=high_prob_done,
+                            force_heavy=args.deep_analysis,
                         )
                         if not static_won.is_set():
                             device = frida.get_device(serial, timeout=5) if serial else frida.get_usb_device(timeout=5)

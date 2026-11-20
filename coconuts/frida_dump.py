@@ -21,13 +21,16 @@ from .ciphers import describe_key, normalize_key
 from .extract import LuaBytecodeReport, jsc_to_js, lua_live_name, safe_join
 from .log import SUCCESS, flog
 from .r2 import (
+    DECRYPT_FAIL_NEEDLES,
     EVAL_STRING_NEEDLES,
+    LUA_LOAD_NEEDLES,
     _r2_abort_guard,
     _resolve_relro_set_xxtea_key,
     find_key_function,
     find_lua_load_function,
     find_string_xref_function,
     find_symbol_vaddr,
+    lib_contains_any,
     r2_open_and_analyse,
 )
 
@@ -107,8 +110,15 @@ def resolve_frida_targets(
     lib_path: str,
     abort_event: threading.Event | None = None,
     high_prob_done: threading.Event | None = None,
+    force_heavy: bool = False,
 ) -> tuple[str, int | None, int | None, bool, int | None]:
-    """Resolves JNI symbol, dump_off, key_off and lua_load_off, fast symbol/relro check first."""
+    """Resolves JNI symbol, dump_off, key_off and lua_load_off, fast symbol/relro check first.
+
+    `force_heavy` runs the full radare2 analysis even when a fast path already found a key
+    function, and prefers what it finds. The .data.rel.ro slot in particular accepts any pointer
+    into code, so on an engine laid out differently it "succeeds" with the wrong function and
+    would otherwise keep the analysis from ever running.
+    """
     if abort_event and abort_event.is_set():
         return "", None, None, False, None
 
@@ -151,10 +161,26 @@ def resolve_frida_targets(
     if abort_event and abort_event.is_set():
         return cocos_symbol, dump_off, key_off, key_is_std_string, lua_load_off
 
-    # Only run heavy `aap; aaef` if key_off was not found via symbol table or .data.rel.ro.
-    # Wait for high-probability static tiers (Tier0..Tier2) first; if Tier 3 continues,
-    # race heavy r2 analysis in parallel and kill r2 immediately if abort_event fires.
-    if key_off is None:
+    # The heavy `aap; aaef` analysis takes minutes, so it runs only for a search that is both
+    # wanted (its target is still missing, or --deep-analysis asks for the key again) and possible
+    # (the library carries the string the search starts from). It waits for the high-probability
+    # static tiers (Tier0..Tier2) first, then races Tier 3 and is killed if abort_event fires.
+    find_key = (key_off is None or force_heavy) and lib_contains_any(lib_path, DECRYPT_FAIL_NEEDLES)
+    find_dump = dump_off is None and lib_contains_any(lib_path, EVAL_STRING_NEEDLES)
+    find_lua = lua_load_off is None and lib_contains_any(lib_path, LUA_LOAD_NEEDLES)
+    if force_heavy:
+        if find_key and key_off is not None:
+            flog.info("Running the full radare2 analysis anyway (--deep-analysis); it overrides the "
+                      "key function found above if it finds one.")
+        elif not find_key:
+            flog.warning("--deep-analysis: the library has no %r message (Lua engines don't), "
+                         "so the full analysis can't locate a key function here.",
+                         DECRYPT_FAIL_NEEDLES[-1])
+    elif key_off is None and not find_key:
+        flog.warning("Key function not found statically (no %r message in the library); "
+                     "Frida will try symbol exports.", DECRYPT_FAIL_NEEDLES[-1])
+
+    if find_key or find_dump or find_lua:
         if high_prob_done is not None and not (abort_event and abort_event.is_set()):
             high_prob_done.wait()
 
@@ -167,16 +193,21 @@ def resolve_frida_targets(
         )
         try:
             with _r2_abort_guard(r2, abort_event):
-                if not (abort_event and abort_event.is_set()):
+                if find_key and not (abort_event and abort_event.is_set()):
                     try:
                         key_off = find_key_function(r2, strings, symbols)
+                        key_is_std_string = False  # xxtea_decrypt takes the raw key bytes
                         flog.info("Key function at %#x", key_off)
                     except Exception as e:
                         if not (abort_event and abort_event.is_set()):
-                            flog.warning("Key function not found statically (%s); Frida will try symbol exports.", e)
+                            if key_off is not None:
+                                flog.warning("Key function not found by the full analysis (%s); "
+                                             "keeping the one at %#x.", e, key_off)
+                            else:
+                                flog.warning("Key function not found statically (%s); Frida will try symbol exports.", e)
                             flog.debug("details", exc_info=True)
 
-                if dump_off is None and not (abort_event and abort_event.is_set()):
+                if find_dump and not (abort_event and abort_event.is_set()):
                     try:
                         dump_off = find_string_xref_function(r2, strings, EVAL_STRING_NEEDLES)
                         flog.info("Dump function at %#x", dump_off)
@@ -186,9 +217,8 @@ def resolve_frida_targets(
                             flog.debug("details", exc_info=True)
 
                 # A Lua lib has no evalString at all, so this is the only dump target it can
-                # offer once luaL_loadbuffer has been hidden from the symbol table. Searched
-                # only on the heavy path, which a lib stripped that far has already triggered.
-                if lua_load_off is None and not (abort_event and abort_event.is_set()):
+                # offer once luaL_loadbuffer has been hidden from the symbol table.
+                if find_lua and not (abort_event and abort_event.is_set()):
                     try:
                         lua_load_off = find_lua_load_function(r2, strings, symbols)
                         flog.info("Lua loader at %#x", lua_load_off)

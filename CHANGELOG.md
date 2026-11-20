@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `--deep-analysis` forces the full radare2 analysis (`aap; aaef`) that locates the
+  Frida key hook. It used to run only when both fast paths came up empty, and the
+  `.data.rel.ro+0xa0` slot accepts any pointer into code, so a misfiring slot
+  kept the fallback from ever running. With the flag, the full analysis's key
+  function replaces the fast-path one, which is kept only when it finds nothing.
+  `resolve_frida_targets` takes the matching `force_heavy` argument. It can't
+  help on Lua engines, which lack the `"Can't decrypt code for %s"` message the
+  key search starts from, and says so.
+
+### Changed
+
+- The full radare2 analysis is skipped when the library holds none of the
+  strings its remaining searches start from, checked with a byte search first
+  (`r2.lib_contains_any`). On the 40 MB `libcocos2dlua.so` of an encrypted Lua
+  game that is 156 s of `aap; aaef` that could never find anything; with
+  `--deep-analysis` the whole run there went from 202 s to 40 s.
+
+### Verified against real games
+
+`--deep-analysis` on a Pixel 7 / Android 13. On **Top War** (`com.topwar.gp`,
+`libcocos2djs.so`, 24 MB) the full analysis took 29 s and picked the same
+`xxtea_decrypt` (`0x9d2abc`) the symbol table exports. On the encrypted Lua game
+(`com.ksrgland.goat`) it is skipped as above; Frida captured the key, verified
+it, and the output was identical to a run without the flag (4078 decrypted, 1723
+live dumps).
+
 ## [3.0.0] - 2026-11-14
 
 ### Changed

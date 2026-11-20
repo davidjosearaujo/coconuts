@@ -70,6 +70,22 @@ def _r2_abort_guard(r2, abort_event: threading.Event | None):
         done.set()
 
 
+def lib_contains_any(lib_path: str, needles: list[str]) -> bool:
+    """Whether any needle occurs in the library's bytes at all, without radare2.
+
+    The heavy-analysis searches all start from one of these strings, so a library with none of
+    them can't yield anything, and checking first saves minutes of `aap; aaef`. Every needle is
+    ASCII, as the engine's messages are, so a byte search sees what radare2's string list would.
+    """
+    import mmap
+
+    try:
+        with open(lib_path, "rb") as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return any(m.find(n.encode()) != -1 for n in needles)
+    except (OSError, ValueError):
+        return True  # can't tell: let radare2 try, as it always did
+
+
 def find_symbol_vaddr(symbols: list[dict], patterns: list[str]) -> int | None:
     """Finds a defined function vaddr in the symbol table matching any regex pattern."""
     for pat in patterns:

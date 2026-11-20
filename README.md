@@ -138,6 +138,12 @@ SpiderMonkey bytecode.
      by symbol or through cross-references to its error strings.
    - Full analysis can take minutes. It waits until the static track has tried its high-probability
      candidates (tiers 0–2), and it's killed the moment the static track wins.
+   - The `.data.rel.ro` check accepts any pointer into code, so on an engine laid out differently it
+     can hand back an unrelated function, and the full analysis then never runs. `--deep-analysis`
+     runs it anyway and prefers its answer, keeping the fast-path one only when it finds nothing.
+   - Every search in the full analysis starts from a string, so it's skipped when the library
+     carries none of the ones still needed. Lua engines have no `"Can't decrypt code for %s"`, so
+     `--deep-analysis` can't find a key function there and says so instead of spending minutes.
 2. **Spawn and hook.** coconuts spawns the game suspended, injects
    [`frida_hook.js`](coconuts/frida_hook.js) and resumes it. The hook watches the dynamic linker
    (`do_dlopen`) and installs these hooks as soon as the Cocos library loads:
@@ -482,6 +488,9 @@ coconuts ./libcocos.so com.example.game ./out --static-only --apk base.apk --apk
 # Reformat the dumped scripts so minified one-liners are readable
 coconuts --static-only --apk ./base.apk ./out --pretty
 
+# Frida runs but never catches a key (or catches a wrong one): force the full radare2 analysis
+coconuts ./libcocos.so com.example.game ./out --deep-analysis --timeout 60
+
 # You already know the key (and, optionally, the signature prefix)
 coconuts ./libcocos.so com.example.game ./out --apk ./base.apk --key 1a2b3c4d-5e6f-7a --sign kkk
 
@@ -511,6 +520,7 @@ coconuts ./libcocos.so com.example.game ./out --apk ./base.apk \
 | `--timeout SEC` | `10` | How long Frida waits for a key after spawning the game. |
 | `--live-seconds SEC` | `5` | How long to keep the Frida session open after the key, collecting scripts as the game evaluates them. Ctrl-C ends it early and moves on to decryption. |
 | `--static-only` | off | Skip Frida entirely. |
+| `--deep-analysis` | off | Always run the full radare2 analysis (`aap; aaef`) to find the Frida key hook, even when the symbol table or the `.data.rel.ro` slot already gave one, and prefer what it finds. Slow (can take minutes). JS engines only: a Lua engine lacks the message the search starts from. Only affects the Frida track, so it's ignored with `--static-only`, `--key` or `--aes-key`. |
 | `--key KEY` | — | A known XXTEA key, as text. It's zero-padded or truncated to 16 bytes, as Cocos does. Skips key discovery. |
 | `--sign SIGN` | auto-detect | The signature prefix to strip from every encrypted script. `--sign ''` disables stripping. |
 | `--aes-key HEX` | — | An EncryptManager AES key. Switches to AES mode, which processes every asset. |
@@ -612,7 +622,9 @@ Run with `-v` for the full error. The static track carries on regardless.
 Often the game detected root or Frida. Rely on `--static-only`, or try another device.
 
 **`No key captured within 10s.`**
-Some games only load their scripts after a splash or login screen. Raise `--timeout`. On an x86_64
+Some games only load their scripts after a splash or login screen. Raise `--timeout`. If the log
+shows `setXXTeaKey found via .data.rel.ro+0xa0`, that slot may point at the wrong function: retry
+with `--deep-analysis`. On an x86_64
 emulator this is expected, because the Frida track can't hook games there. Use `--static-only`
 instead (see [Linux and x86 PCs](#linux-and-x86-pcs)).
 
@@ -622,7 +634,7 @@ The hook caught some other XXTEA call. coconuts re-runs the full static search a
 **`No working key found…`** or **`Every file failed to decrypt…`**
 The raw files are saved in `OUTPUT/raw_scripts/`. Things to try:
 - `-v` to see why each file failed.
-- A longer Frida run.
+- A longer Frida run, or `--deep-analysis` to re-resolve the key hook.
 - An explicit `--sign` if the prefix detection guessed wrong.
 - `--key`, if you found the key some other way.
 

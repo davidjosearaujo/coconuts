@@ -88,7 +88,7 @@ def race(monkeypatch: pytest.MonkeyPatch) -> Race:
     frida_mod.get_device = lambda serial, timeout=None: FakeDevice()
     monkeypatch.setitem(sys.modules, "frida", frida_mod)
 
-    def resolve(lib_path, abort_event=None, high_prob_done=None):
+    def resolve(lib_path, abort_event=None, high_prob_done=None, force_heavy=False):
         # Resolving the hook offsets means radare2 analysis, which in a real run takes far longer
         # than collecting the APK's scripts. So this returns only once the static track has
         # settled -- won outright, or entered its search -- which is what puts the two tracks in
