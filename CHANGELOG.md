@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-11-20
+
 ### Added
 
 - `--deep-analysis` forces the full radare2 analysis (`aap; aaef`) that locates the
@@ -448,7 +450,8 @@ Cocos Creator Android games and dumps their decrypted JavaScript.
   PCs, usage, output, troubleshooting and limitations; the MIT license and the
   coconut logo.
 
-[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v3.0.0...HEAD
+[Unreleased]: https://codeberg.org/davidjosearaujo/coconuts/compare/v3.1.0...HEAD
+[3.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v3.0.0...v3.1.0
 [3.0.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.1.0...v3.0.0
 [2.1.0]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.1...v2.1.0
 [2.0.1]: https://codeberg.org/davidjosearaujo/coconuts/compare/v2.0.0...v2.0.1
